@@ -60,6 +60,7 @@ class DocumentLineItem(Base):
     document_id: Mapped[int] = mapped_column(ForeignKey("financial_documents.id"), index=True)
     item_type: Mapped[str] = mapped_column(String(16))  # expense / payment / ...
     item_name: Mapped[str] = mapped_column(String(128))
+    specification: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 规格：市场价规则维度
     expense_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     expense_location: Mapped[str | None] = mapped_column(String(64), nullable=True)
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

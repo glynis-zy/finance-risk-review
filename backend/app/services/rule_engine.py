@@ -53,6 +53,7 @@ class RuleContext:
     configs: dict[str, dict]
     standards: list[ExpenseStandard]
     price_refs: list[MarketPriceReference]
+    position_level: str | None = None   # 申请人职级（费用标准规则维度）
 
 
 def build_context(db: Session, document: FinancialDocument) -> RuleContext:
@@ -85,6 +86,11 @@ def build_context(db: Session, document: FinancialDocument) -> RuleContext:
         FinancialDocument.document_status.in_(["approved", "pending_review", "reviewing"]),
     )).all())
 
+    # 申请人职级（费用标准规则维度，规格 2.7.7：类别×部门×职级×地区）
+    from app.models.user import User
+    applicant = db.get(User, document.applicant_id)
+    position_level = applicant.position_level if applicant else None
+
     configs = load_configs(db)
     standards = list(db.scalars(select(ExpenseStandard)).all())
     price_refs = list(db.scalars(select(MarketPriceReference)).all())
@@ -92,6 +98,7 @@ def build_context(db: Session, document: FinancialDocument) -> RuleContext:
         db=db, document=document, line_items=line_items, attachments=attachments,
         invoices=invoices, parse_results=parse_results, supplier=supplier,
         history=history, configs=configs, standards=standards, price_refs=price_refs,
+        position_level=position_level,
     )
 
 
@@ -334,30 +341,66 @@ def _expense_category(item_name: str) -> str | None:
     return None
 
 
+def _match_standard(standards: list[ExpenseStandard], dept: str | None,
+                    level: str | None, region: str | None) -> ExpenseStandard | None:
+    """按 类别×部门×职级×地区 选最精确标准。
+
+    维度指定但不匹配 → 该条标准不适用（排除）；维度为空的标准作为宽松兜底。
+    命中维度越多（score 越高）越优先。
+    """
+    best: tuple[int, ExpenseStandard] | None = None
+    for s in standards:
+        sc = 0
+        if s.department:
+            if s.department != dept:
+                continue
+            sc += 1
+        if s.position_level:
+            if s.position_level != level:
+                continue
+            sc += 1
+        if s.region:
+            if s.region != region:
+                continue
+            sc += 1
+        if best is None or sc > best[0]:
+            best = (sc, s)
+    return best[1] if best else None
+
+
 def check_expense_policy(ctx: RuleContext, cfg: dict) -> list[Finding]:
     if ctx.document.document_type not in ("expense", "travel"):
         return []
     findings: list[Finding] = []
     exceed_pct = Decimal(str(cfg.get("exceed_pct", 20)))
+    dept = ctx.document.budget_department  # 预算部门
+    level = ctx.position_level            # 申请人职级
     for item in ctx.line_items:
         if item.item_type == "payment":
             continue
         cat = _expense_category(item.item_name)
         if cat is None:
             continue
-        standards = [s for s in ctx.standards if s.expense_category == cat]
-        if not standards:
+        candidates = [s for s in ctx.standards if s.expense_category == cat]
+        s = _match_standard(candidates, dept, level, item.expense_location)
+        if s is None:
             continue
-        s = standards[0]
         if item.amount > s.standard_amount:
             ratio = (item.amount - s.standard_amount) / s.standard_amount * 100
             if ratio > exceed_pct:
                 findings.append(Finding(
                     risk_type="expense_policy_compliance", risk_level="medium",
                     risk_title="费用超出标准",
-                    description=f"{item.item_name} {item.amount} 超过标准 {s.standard_amount}（超 {ratio:.1f}%）",
+                    description=(
+                        f"{item.item_name} {item.amount} 超过标准 {s.standard_amount}"
+                        f"（部门={dept}, 职级={level}, 地区={item.expense_location}，超 {ratio:.1f}%）"
+                    ),
                     actual={"amount": str(item.amount)},
-                    reference={"standard_amount": str(s.standard_amount)},
+                    reference={
+                        "standard_amount": str(s.standard_amount),
+                        "dimensions": {"department": s.department, "position_level": s.position_level,
+                                       "region": s.region},
+                    },
                     threshold={"exceed_pct": str(exceed_pct)},
                     suggestion="补充超标说明或申请特批",
                 ))
@@ -367,17 +410,39 @@ def check_expense_policy(ctx: RuleContext, cfg: dict) -> list[Finding]:
 # ---------- 规则 6：市场价格合理性 ----------
 
 def check_price(ctx: RuleContext, cfg: dict) -> list[Finding]:
+    """市场价格合理性：名称 × 规格 × 地区 × 时间（规格 2.7.7）。
+
+    匹配顺序：名称（双向包含）→ 规格（有规格则优先精确匹配）→ 地区 → 时间（取生效日期不晚于消费日的参考）。
+    """
     findings: list[Finding] = []
     deviation_pct = Decimal(str(cfg.get("deviation_pct", 20)))
     for item in ctx.line_items:
         if item.unit_price is None:
             continue
-        refs = [r for r in ctx.price_refs if r.item_name in item.item_name or item.item_name in r.item_name]
+        name = item.item_name or ""
+        refs = [r for r in ctx.price_refs if r.item_name in name or name in r.item_name]
         if not refs:
             continue
-        ref = refs[0]
+
+        # 规格：明细填了规格 → 优先精确匹配带相同规格的参考
+        if item.specification:
+            spec_refs = [r for r in refs if r.specification == item.specification]
+            if spec_refs:
+                refs = spec_refs
+        # 地区：明细填了地点 → 优先匹配该地区的参考
+        if item.expense_location:
+            loc_refs = [r for r in refs if r.region == item.expense_location]
+            if loc_refs:
+                refs = loc_refs
+        # 时间：取生效日期不晚于消费日期的参考；否则取最早的
+        if item.expense_date is not None:
+            valid = [r for r in refs if r.effective_date <= item.expense_date]
+            ref = max(valid, key=lambda r: r.effective_date) if valid else min(refs, key=lambda r: r.effective_date)
+        else:
+            ref = max(refs, key=lambda r: r.effective_date)
+
         price = item.unit_price
-        dev = 0
+        dev = Decimal(0)
         if price < ref.price_min:
             dev = (ref.price_min - price) / ref.price_min * 100
         elif price > ref.price_max:
@@ -386,9 +451,15 @@ def check_price(ctx: RuleContext, cfg: dict) -> list[Finding]:
             findings.append(Finding(
                 risk_type="price_reasonableness", risk_level="medium" if dev <= 50 else "high",
                 risk_title="价格偏离市场区间",
-                description=f"{item.item_name} 单价 {price} 偏离市场区间 [{ref.price_min}, {ref.price_max}] {dev:.1f}%",
-                actual={"unit_price": str(price)},
-                reference={"price_min": str(ref.price_min), "price_max": str(ref.price_max)},
+                description=(
+                    f"{item.item_name}（{item.specification or '无规格'}，{item.expense_location or '无地区'}）"
+                    f"单价 {price} 偏离市场区间 [{ref.price_min}, {ref.price_max}] {dev:.1f}%"
+                ),
+                actual={"unit_price": str(price), "specification": item.specification,
+                        "region": item.expense_location},
+                reference={"price_min": str(ref.price_min), "price_max": str(ref.price_max),
+                           "specification": ref.specification, "region": ref.region,
+                           "effective_date": str(ref.effective_date)},
                 threshold={"deviation_pct": str(deviation_pct)},
                 evidence={"source": ref.source_name},
                 suggestion="核对采购价格合理性",

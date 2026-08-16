@@ -39,9 +39,11 @@ DRAFT, PENDING, REVIEWING, RETURNED = "draft", "pending_review", "reviewing", "r
 APPROVED, REJECTED, WITHDRAWN, VOIDED = "approved", "rejected", "withdrawn", "voided"
 
 # L3 状态守卫表：动作 → 允许的当前状态
+# submit 同时承担"首次提交"(draft) 与"退回后重提交"(returned)：
+# returned 提交时同样生成新版本 + 新审批实例 + 新分析任务。
 GUARD: dict[str, set[str]] = {
     "edit": {DRAFT, RETURNED},
-    "submit": {DRAFT},
+    "submit": {DRAFT, RETURNED},
     "withdraw": {PENDING},
     "void": {DRAFT, PENDING},
 }
@@ -208,13 +210,16 @@ def copy(db: Session, user: User, doc_id: int) -> FinancialDocument:
 
 
 def submit(db: Session, user: User, doc_id: int) -> FinancialDocument:
+    """提交/重提交：draft→pending_review（首次）；returned→pending_review（退回后重提交，
+    同样走 新版本快照 + 新审批实例 + 新分析任务）。"""
     doc = _ensure_visible(db, user, doc_id)
     _ensure_owner(db, user, doc)
     _guard(doc, "submit")
     _validate_completeness(db, doc)
 
-    _snapshot(db, doc, user)
-    _transition(db, doc, PENDING, user, "提交审批")
+    is_resubmit = doc.document_status == RETURNED
+    _snapshot(db, doc, user)          # 新版本（version_no +1）
+    _transition(db, doc, PENDING, user, "退回后重新提交" if is_resubmit else "提交审批")
 
     # 建审批实例 + 首个任务；建分析任务（异步）
     workflow_service.start_approval(db, doc)
@@ -402,6 +407,7 @@ def _validate_completeness(db: Session, doc: FinancialDocument) -> None:
 def _line_items_out(items: list[DocumentLineItem]) -> list[dict]:
     return [{
         "id": i.id, "item_type": i.item_type, "item_name": i.item_name,
+        "specification": i.specification,
         "expense_date": str(i.expense_date) if i.expense_date else None,
         "expense_location": i.expense_location,
         "quantity": str(i.quantity) if i.quantity is not None else None,

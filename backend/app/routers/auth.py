@@ -14,7 +14,7 @@ from app.core.security import create_access_token, revoke_token
 from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.auth import LoginRequest, TokenResponse, UserOut
-from app.services import auth_service
+from app.services import audit_service, auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -43,9 +43,12 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) ->
 def logout(
     cred: HTTPAuthorizationCredentials | None = Depends(bearer),
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict:
     if cred is not None:
-        revoke_token(cred.credentials)
+        revoke_token(db, cred.credentials)  # 写 revoked_tokens 表，持久化撤销
+        audit_service.log(db, user, "auth:logout", "user", str(user.id))
+        db.commit()
     return {"ok": True}
 
 

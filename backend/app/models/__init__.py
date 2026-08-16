@@ -17,6 +17,7 @@ from app.models.reference import (
     SupplierProfile,
     SysParam,
 )
+from app.models.revoked import RevokedToken
 from app.models.session import ReviewSession, SessionMessage
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.models.workflow import (
@@ -34,5 +35,5 @@ __all__ = [
     "ApprovalWorkflow", "ApprovalWorkflowNode", "ApprovalInstance", "ApprovalTask",
     "AnalysisTask", "RiskFinding", "ReviewReport", "ManualReview",
     "MarketPriceReference", "SupplierProfile", "ExpenseStandard", "RiskRule",
-    "SysParam", "AuditLog", "DOCUMENT_TYPES",
+    "SysParam", "RevokedToken", "AuditLog", "DOCUMENT_TYPES",
 ]

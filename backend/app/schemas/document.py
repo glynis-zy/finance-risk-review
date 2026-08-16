@@ -37,6 +37,7 @@ class DocumentUpdate(BaseModel):
 class LineItemCreate(BaseModel):
     item_type: str = "expense"     # expense / payment / transport / hotel / meal
     item_name: str
+    specification: str | None = None   # 规格：市场价规则维度
     expense_date: date | None = None
     expense_location: str | None = None
     quantity: Decimal | None = None
@@ -47,6 +48,7 @@ class LineItemCreate(BaseModel):
 
 class LineItemUpdate(BaseModel):
     item_name: str | None = None
+    specification: str | None = None
     expense_date: date | None = None
     expense_location: str | None = None
     quantity: Decimal | None = None
@@ -61,6 +63,7 @@ class LineItemOut(BaseModel):
     id: int
     item_type: str
     item_name: str
+    specification: str | None
     expense_date: date | None
     expense_location: str | None
     quantity: Decimal | None

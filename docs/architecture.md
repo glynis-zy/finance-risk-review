@@ -24,9 +24,10 @@
 | 后端 | Python **FastAPI** + SQLAlchemy ORM + Pydantic | 路由按模块一文件；Pydantic 模型≈表结构 |
 | 数据库 | **MySQL 8**（Docker 运行） | SQLAlchemy 抽象，可切库 |
 | 前端 | **原生 HTML/CSS/JS 单页应用**（FastAPI 托管静态） | 无构建步骤、无框架依赖；hash 路由 + schema 驱动动态表单 |
-| 异步任务 | **进程内 asyncio 队列** + 前端轮询 | 不引 Celery/Redis，少两个中间件就少两个面试追问点 |
+| 异步任务 | **进程内 asyncio 队列** + 前端轮询 | **仅限单进程 Demo**（`uvicorn --workers 1`）；任务状态落库，但队列不持久化，重启丢未完成任务；生产可平滑替换 Celery/RQ/消息队列 |
 | LLM | DeepSeek（`deepseek-chat`），**适配层封装，厂商可换** | 用途：合同字段提取 + 对话意图解析 + 风险说明润色 |
 | OCR | 百度云 OCR：**增值税发票识别**（专用）+ **通用文字识别** | 发票走专用模型，非固定版式文档走通用 |
+| PDF 处理 | pypdf（文本直取）+ **PyMuPDF（扫描 PDF 渲染每页→逐页 OCR，带页码定位）** | 文本型与扫描型 PDF 都能解析 |
 | 实时消息 | **前端轮询**（2~3s）任务状态接口 | 规格 2.7.12 的事件类型由轮询接口返回，不建 WebSocket |
 
 **刻意不做**：Celery/Redis、本地模型部署、PDF 生成库。理由见 §15。
@@ -40,10 +41,11 @@
    │
    ▼
 ① 文档类型识别 + OCR 适配层
+   ├─ PDF 先 pypdf 抽文本：有有效文本→直取；否则扫描PDF用 PyMuPDF 渲染每页→逐页OCR
    ├─ 增值税发票  → 专用发票OCR(百度云)      → InvoiceFields(Pydantic 校验)
    ├─ 合同        → 通用OCR全文 → LLM结构化提取 → ContractFields(Pydantic 校验)
    └─ 行程单/付款依据 → 通用OCR全文(可LLM提取) → 字段进 JSON
-   │   ▲ 三级 fallback: AUTO(真调用) → 命中预制案例(用预置结果) → 解析失败
+   │   ▲ 三种解析模式: real(真实API,失败即败) / auto(真实→失败回退预制) / preset(仅预制)
    ▼
 ② 结构化数据汇总
    单据字段 + 明细 + InvoiceFields + ContractFields + 供应商资料 + 历史单据
@@ -71,8 +73,8 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Vue3 + Element Plus 前端（13 页）                            │
-│  路由 / views / components / api 层 / stores / 轮询          │
+│  原生 HTML/CSS/JS 单页前端（hash 路由 + 视图函数）            │
+│  js/api.js 一个模块对应一个后端 router · 轮询任务状态        │
 └───────────────┬───────────────────────┬──────────────────────┘
                 │ REST (JWT Bearer)     │ 轮询: /analysis-tasks/{id}
                 ▼                       ▼
@@ -96,7 +98,7 @@
 │    report_service     报告 markdown→HTML 导出                   │
 │    audit_service      操作审计                                  │
 │    llm_client         DeepSeek 适配层（结构化输出+Pydantic）     │
-│    ocr_client         百度云 OCR 适配层（发票+通用，三级fallback）│
+│    ocr_client         百度云 OCR 适配层（发票+通用，纯真实API）   │
 │                                                               │
 │  core/        config · security · perms(RBAC) · deps           │
 │  db/          session · base · (表结构见 §6)                    │
@@ -138,7 +140,7 @@
 
 ## 6. 数据模型设计
 
-### 6.1 规格已给出的表（21 张，2.7.10）
+### 6.1 规格已给出的表（25 张，2.7.10）
 
 users / roles / permissions / user_roles / role_permissions
 review_sessions / session_messages
@@ -148,16 +150,22 @@ approval_workflows / approval_workflow_nodes / approval_instances / approval_tas
 analysis_tasks / risk_findings / review_reports
 market_price_references / supplier_profiles / manual_reviews / audit_logs
 
-（实际 26 张，规格编号略有出入，以实现为准）
+（以上 25 张为规格原列出的表，逐条核对无误）
 
-### 6.2 规格缺口修复（本设计新增）
+### 6.2 规格缺口修复（新增 4 张表）
 
 | 新增 | 用途 |
 |---|---|
 | **`risk_rules`** | 规则配置表（2.7.10 缺规则表）。字段：`id, rule_code, rule_name, applies_to_json, enabled, config_json, updated_by, updated_at`。`config_json` 承载各规则阈值（金额容差%、市场价偏离阈值、异常次数、置信度阈值等）。对应 2.7.11 的 `/rules` CRUD 与"规则配置页"。 |
 | **`expense_standards`** | 费用标准表（`expense_policy_compliance` 规则的数据源）。字段：`id, expense_category, department, position_level, region, standard_amount, currency, effective_date`。 |
-| **`financial_documents.type_fields_json`** | 类型专属字段（合同编号、付款比例、出差地点、补贴金额…）落点。**元数据驱动**：每类单据一份字段定义（`document_schemas/<type>.py`），动态表单据此渲染、校验据此执行。新增单据类型=新增一份定义文件，平台零改动。 |
 | **`sys_params`** | 系统参数表（2.7.3：管理员维护系统参数）。风险升级阈值、OCR 模式开关等运行时可调，业务经 `sysparam_service` 读取，不硬编码。管理端 `/admin/sys-params` 维护。 |
+| **`revoked_tokens`** | JWT 撤销表（2.7.14 撤销机制）。字段：`id, jti(唯一), expires_at, revoked_at`。登出/泄露时写入，**重启不丢**；内存 set 仅作快速路径缓存。 |
+
+> **字段扩展（非表）**：`financial_documents.type_fields_json` —— 类型专属字段（合同编号、付款比例、出差地点、补贴金额…）落点。**元数据驱动**：每类单据一份字段定义（`document_schemas/<type>.py`），动态表单据此渲染、校验据此执行。新增单据类型=新增一份定义文件，平台零改动。
+>
+> **字段扩展（非表）**：`users.position_level`（职级，费用标准规则维度）、`document_line_items.specification`（规格，市场价规则维度）。
+
+**表数量合计：规格 25 张 + 新增 4 张 = 29 张表**（`type_fields_json` 等为列，不占表数）。
 
 ### 6.3 单据模型设计（通用 + 元数据）
 
@@ -212,7 +220,7 @@ draft / pending_review ──作废──▶ voided
 |---|---|---|
 | **L1 RBAC 功能权限** | 角色→操作。申请人可创建/编辑/提交/撤回本人单据；审批人可处理任务/提交审批结果；财务可查看全部分析、维护规则与供应商；管理员可维护用户/角色/流程/系统参数。 | `permissions` 表 + 权限装饰器（`@require_perm("document:submit")`） |
 | **L2 数据权限（行级）** | 申请人=本人单据；审批人=分配给他的任务及其单据与分析结果；财务=全部分析结果；管理员=全部。 | 查询层强制过滤（service 层统一注入 `data_scope`，非前端拼 SQL） |
-| **L3 单据状态权限** | 操作合法性随状态变化：仅 `draft/returned` 可编辑；仅 `pending_review` 可撤回；仅 `draft` 可提交；审批操作仅任务处于 `pending`。 | `document_service` 状态机内部校验 + `workflow_service` 任务状态校验 |
+| **L3 单据状态权限** | 操作合法性随状态变化：仅 `draft/returned` 可编辑；仅 `draft/returned` 可提交（returned 为退回后重提交，生成新版本+新审批实例+新分析任务）；仅 `pending_review` 可撤回；审批操作仅任务处于 `pending`。 | `document_service` 状态机内部校验 + `workflow_service` 任务状态校验 |
 
 **关键点**：三层叠加，缺一不可。例如"申请人"即便角色有删除权限，也不能删除非本人单据（L2），且只能编辑 `draft/returned` 状态的单据（L3）。
 
@@ -243,15 +251,27 @@ def check_rule(ctx: RuleContext) -> list[Finding]
 
 **确定性保证**：规则只读数据与配置，无随机、无模型调用；每条 finding 必须携带 `actual_value / reference_value / threshold / evidence / data_source`（对应规格 2.7.7 最后一条）。
 
+> 费用标准的四维数据来源：类别=明细名称→科目（关键词）；部门=单据 `budget_department`；**职级=申请人 `users.position_level`**；地区=明细 `expense_location`。匹配策略：维度指定但不匹配的标准排除，命中维度越多越优先，全空标准作宽松兜底。
+>
+> 市场价的四维数据来源：名称=明细 `item_name`；**规格=明细 `specification`（`document_line_items` 新增列）**；地区=明细 `expense_location`；时间=明细 `expense_date` 对比参考 `effective_date`（取生效日期不晚于消费日的参考）。匹配顺序：名称（双向包含）→ 规格精确 → 地区 → 时间。
+
 ---
 
 ## 11. 解析流水线细节（AUTO / 预制 / 失败）
 
-OCR 适配层三级模式（`services/ocr_client.py`）：
+解析由系统参数 `ocr.mode` 决定三种模式（`parse_pipeline.parse_attachment` 编排）：
 
-1. **AUTO**：正常调用云 OCR（发票专用 or 通用），返回真实结果。
-2. **命中预制案例**：若附件文件名/内容命中 `demo/preset_parse/*.json` 中预置的解析结果（演示数据专用），直接用预置结果（保证 demo 链路稳定）。
-3. **解析失败**：其余情况返回失败，进入 `manual_review` 状态并允许重试。
+- **preset**：直接命中 `demo/preset_parse/*.json` 预置结果落表，**不调用任何外部 API**（演示确定性）；
+- **auto**（默认）：先真实调用云 OCR / LLM，**失败后回退**命中预制案例，再失败才解析失败；
+- **real**：只走真实 OCR/LLM，失败即失败，不查预制。
+
+命中预制案例即**跳过 OCR 与 LLM**（直接写 `AttachmentParseResult` / `InvoiceRecord`）。
+
+**PDF 双路径**（`_content_sources`）：文本型 PDF 先用 pypdf 抽文本（≥20 有效字符视为可用）；扫描型（图片 PDF）用 **PyMuPDF 渲染每页为 PNG → 逐页 OCR**，聚合全文并给每个词条标 **页码**（原文定位到页），发票则逐页调专用识别、取首个识别出关键字段的结果。OCR/LLM 失败统一走 auto 回退或 failed。
+
+**职责边界（附件解析 vs 风险分析）**：附件解析只更新 `document_attachments.parse_status` 五态（`pending→parsing→succeeded/failed/manual_review`），**不创建 analysis_tasks**；解析失败置 `failed`，可再次调用该接口重试；`manual_review` 保留给"解析成功但需人工确认"场景。`analysis_tasks` 仅表示某单据的一次**整单风险分析**，其 `parsing_attachments` 阶段会顺带解析未成功的附件（复用本流水线）。
+
+**分析任务状态（对齐规格 2.7.12 枚举）**：`analysis_tasks.task_status` = `queued → querying_document → loading_attachments → parsing_attachments → analyzing → succeeded / failed / cancelled`（cancelled 预留，当前无取消入口）。
 
 LLM 提取：
 - 合同等非固定版式：OCR 全文 → LLM 输出 **严格 JSON**（`ContractFields` Pydantic schema）→ 校验，失败重试一次 → 仍失败则 `manual_review`。
@@ -290,7 +310,7 @@ LLM 提取：
 `demo/seed.py` 生成：
 - 5 类单据各若干套（含合法/含风险两种，用于演示高/中/低风险）。
 - 附件：发票/合同/行程单/付款依据（脚本生成或少量真实样例图）。
-- **预制解析结果**：`demo/preset_parse/*.json` 与附件一一对应，供 OCR fallback。
+- **预制解析结果**：`demo/preset_parse/*.json` 与附件一一对应，供 preset 模式直接使用、auto 模式失败回退。
 - **历史单据**：制造足够历史用于 `spend_anomaly`（历史突增）与供应商历史付款。
 - 市场价参考、费用标准、供应商档案、用户/角色/流程初始数据。
 
@@ -304,7 +324,7 @@ LLM 提取：
 | 附件清晰度独立模型 | 无可靠可测定义；用 **OCR confidence 作为质量代理指标**（规则 #9） |
 | 批量付款高级规则 | 基础金额/笔数/重复收款账号检查全做（规则 #4），高级场景不做 |
 | 全文检索 | 明细查询走结构化过滤，附件全文不建索引 |
-| Celery/Redis/WebSocket | demo 量级用 asyncio 队列 + 轮询，中间件越少越可解释 |
+| Celery/Redis/WebSocket | 为降低 Demo 复杂度用进程内 asyncio 队列 + 轮询（状态落库、队列不持久化、仅单进程）；生产可平滑替换 Celery/RQ/消息队列 |
 | 前端框架/构建工具 | 原生 HTML/CSS/JS 单页 + FastAPI 托管静态，无 Vite/打包步骤 |
 
 ---
@@ -316,4 +336,4 @@ LLM 提取：
 3. **为什么元数据驱动**：新增单据类型=新增一份字段定义文件，平台零改动；动态表单/校验/规则注册共用同一份元数据。
 4. **状态机为什么这样设计**：`reviewing` 与 `pending_review` 语义分离避免时序歧义；撤回/作废/退回重提交都有明确转换与版本规则。
 5. **三层权限为什么必要**：角色权限（能不能）+数据权限（哪些行）+状态权限（什么状态能做什么）三者叠加才是完整授权。
-6. **fallback 设计**：演示不依赖外部 API 稳定性，AUTO→预制→失败三级保障链路永远可跑。
+6. **解析三模式**：`ocr.mode` 分 `preset`/`auto`/`real`；演示用 auto，真实失败自动回退预制，链路永远可跑；生产可切 real。

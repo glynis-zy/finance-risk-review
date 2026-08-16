@@ -167,7 +167,7 @@ async function documentsView(el) {
         <td>¥${fmt(d.total_amount)}</td><td>${stBadge(d.document_status)}</td>
         <td><a class="btn ghost sm" href="#/document/${d.id}">详情</a>
         ${['draft', 'returned'].includes(d.document_status) ? `<a class="btn ghost sm" href="#/document-edit/${d.id}">编辑</a>` : ''}
-        ${d.document_status === 'draft' ? `<button class="btn ok sm" onclick="act('${d.id}','submit')">提交</button>` : ''}
+        ${['draft', 'returned'].includes(d.document_status) ? `<button class="btn ok sm" onclick="act('${d.id}','submit')">提交</button>` : ''}
         ${d.document_status === 'pending_review' ? `<button class="btn warn sm" onclick="act('${d.id}','withdraw')">撤回</button>` : ''}
         ${['draft', 'pending_review'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','void')">作废</button>` : ''}
         </td></tr>`).join('') || '<tr><td colspan=7>暂无</td></tr>'}
@@ -211,7 +211,7 @@ async function docEditView(el, id) {
       <div class="grid" id="type-fields">${typeFieldsHTML(schema.fields, tf)}</div>
       <h3 class="mt">明细</h3>
       <table id="li-table">
-        <thead><tr><th>类型</th><th>名称</th><th>日期</th><th>地点</th><th>单价</th><th>金额</th><th>备注</th><th></th></tr></thead>
+        <thead><tr><th>类型</th><th>名称</th><th>规格</th><th>日期</th><th>地点</th><th>单价</th><th>金额</th><th>备注</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="toolbar mt"><button class="btn ghost sm" onclick="addLiRow()">+ 添加明细</button></div>
@@ -233,6 +233,7 @@ async function docEditView(el, id) {
       <tr data-i="${i}">
         <td><select class="li-type"><option ${li.item_type === 'payment' ? 'selected' : ''}>payment</option><option ${li.item_type !== 'payment' ? 'selected' : ''}>expense</option></select></td>
         <td><input class="li-name" value="${esc(li.item_name)}"></td>
+        <td><input class="li-spec" value="${esc(li.specification || '')}" placeholder="规格"></td>
         <td><input class="li-date" type="date" value="${esc(li.expense_date || '')}"></td>
         <td><input class="li-loc" value="${esc(li.expense_location || '')}"></td>
         <td><input class="li-price" value="${esc(li.unit_price || '')}"></td>
@@ -291,6 +292,7 @@ async function docEditView(el, id) {
         const it = {
           item_type: row.querySelector('.li-type').value,
           item_name: row.querySelector('.li-name').value,
+          specification: row.querySelector('.li-spec').value || null,
           expense_date: row.querySelector('.li-date').value || null,
           expense_location: row.querySelector('.li-loc').value || null,
           unit_price: row.querySelector('.li-price').value || null,
@@ -359,8 +361,8 @@ function docInfoHTML(detail) {
     ${kv('版本', d.current_version)}
     ${tf}
   </dl><h3 class="mt">明细</h3><table>
-    <thead><tr><th>类型</th><th>名称</th><th>日期</th><th>金额</th></tr></thead>
-    <tbody>${(detail.line_items || []).map(li => `<tr><td>${li.item_type}</td><td>${esc(li.item_name)}</td><td>${esc(li.expense_date || '-')}</td><td>¥${fmt(li.amount)}</td></tr>`).join('') || '<tr><td colspan=4>无</td></tr>'}
+    <thead><tr><th>类型</th><th>名称</th><th>规格</th><th>日期</th><th>金额</th></tr></thead>
+    <tbody>${(detail.line_items || []).map(li => `<tr><td>${li.item_type}</td><td>${esc(li.item_name)}</td><td>${esc(li.specification || '-')}</td><td>${esc(li.expense_date || '-')}</td><td>¥${fmt(li.amount)}</td></tr>`).join('') || '<tr><td colspan=5>无</td></tr>'}
     </tbody></table>`;
 }
 

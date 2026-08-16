@@ -39,7 +39,7 @@
 ### 10:20 - 解析流水线
 - `schemas/llm.py`：ContractFields / SlotUpdate（Pydantic 强校验，LLM 禁止自由文本）。
 - `services/llm_client.py`：DeepSeek 适配层（合同字段提取、对话 NLU、报告润色；失败降级）。
-- `services/ocr_client.py`：百度云 OCR 适配层（发票专用 + 通用；AUTO→预制案例→失败 三级）。
+- `services/ocr_client.py`：百度云 OCR 适配层（发票专用 + 通用；当时为"预制优先"实现，后重构为三模式，见 14:00 修正）。
 - `services/parse_pipeline.py`：文档类型识别、文本 PDF 直取（pypdf）、发票/合同/通用三类解析落表。
 - `requirements.txt` 追加 pypdf。
 
@@ -67,7 +67,7 @@
 
 ### 11:40 - 解析流水线增强：全量预制通道
 - `parse_pipeline` 增加"全量预制"优先级：命中 `demo/preset_parse/<附件名>.json`（含 category+fields）→ 直接落表，跳过 OCR 与 LLM。
-- 目的：演示链路完全确定性、不依赖外部 API 稳定性（AUTO→预制→失败 三级在文档级生效）。
+- 目的：演示链路完全确定性、不依赖外部 API 稳定性（当时语义"预制优先"，后统一为三模式，见 14:00 修正）。
 
 ### 12:00 - 演示数据 seed.py + 首次全链路验证
 - `scripts/seed.py`：清空重建 → 角色/权限/5 用户 → 5 类审批流程 → 10 条规则 → 参考数据（费用标准/市场价/3 供应商）→ 5 类示例单据+明细+附件+预制解析 → 全部提交并触发分析。
@@ -99,6 +99,78 @@
 - **`tests/`** pytest 14 条：`compute_overall_level` 公式 + 规则引擎代表性分支（发票/供应商黑名单/批量重复账号/费用超标/附件缺失）+ sysparam 默认值。
 - **`docs/DESIGN.md`**：设计原则表（SRP/OCP/DIP/DI/DTO/四层/纵深/可测）+ 设计模式→代码位置→面试话术 + 管理端说明 + 面试问答预演。
 - 冒烟测试扩到 **27 项**（含管理端 5 项）全过；pytest 14/14 通过。
+
+### 14:00 - 解析三模式重构 + 文档一致性（用户纠正）
+- `ocr.mode` 明确为**三模式**：`preset`（仅预制，不调外部 API）／ `auto`（真实→失败回退预制）／ `real`（真实，失败即败）。默认 `auto`。
+- `ocr_client` 改为**纯真实 API**（移除内部 `_preset_for`）；预制命中逻辑全部上移到 `parse_pipeline`，按模式编排（`parse_attachment` 统一入口）。
+- **文档一致性**：
+  - 前端技术栈统一为原生 HTML/CSS/JS：`architecture.md` 架构图改掉 Vue3/Element Plus；`function-map.md` 的 `src/api/` 残留改为 `frontend/js/api.js`；删除 `frontend/src/*` 空目录（api/views/components/router/stores）。
+  - 解析语义统一为三模式：`architecture.md` §3/§11/§16、`README.md`、`DESIGN.md`、`function-map.md` §2.3/§2.4。
+- 回归：27/27 冒烟 + 14/14 单测通过（`auto` 模式无 key 时真实失败→自动回退预制，链路依旧确定）。
+
+### 14:20 - 修复"退回后重提交"状态机漏洞（用户抓出）
+- 漏洞：`GUARD["submit"]={draft}` 把 returned 挡在门外，与架构"returned→修改→重提交→pending_review（新版本+新实例+新分析任务）"矛盾；函数地图还虚构了不存在的 `resubmit()`。
+- 修复：`submit` 同时承担首次提交与退回后重提交，`GUARD["submit"]={draft, returned}`；returned 提交时 remark 记"退回后重新提交"，照走 `_snapshot`(新版本) + `start_approval`(新实例) + `create_task`(新分析)。
+- 前端：单据列表"提交"按钮改为 `draft`/`returned` 都显示。
+- 文档：architecture §9 L3 改"仅 draft/returned 可提交"；function-map §1.2/§4 合并为"提交/重提交 submit"，删除 resubmit 行。
+- 新增 `tests/test_state_machine.py`：2 条（重提交=新版本+新实例+新任务；draft 首次提交仍正常）。pytest 16/16、冒烟 27/27。
+
+### 14:30 - 修正表数量（用户抓出）
+- 2.7.10 规格原列 **25 张**表（此前文档误写"21 张/实际 26 张"）；新增 **3 张**（risk_rules / expense_standards / sys_params）；`type_fields_json` 是 `financial_documents` 的 **JSON 列，不是表**。
+- 合计：**25 + 3 = 28 张表**。已用 `Base.metadata.tables` 实测核对：正好 28 张。
+- architecture.md §6.1/§6.2 重写：规格表标注 25 张；新增区明确"3 张表 + 1 个字段扩展"；末尾加合计说明。
+- DEVLOG 早期"27 张 ORM 模型"为当时正确记录（sys_params 后加），按历史保留。
+
+### 14:40 - 附件解析与风险分析任务解耦（用户抓出）
+- 问题：函数地图把 `POST /attachments/{aid}/parse` 写成 `parse_pipeline.enqueue()` → `analysis_tasks`，但 `analysis_tasks` 无 `attachment_id/task_type`，附件 A/B 各自重试无法定位；且 parse_status 只有 pending/succeeded/manual_review，缺 parsing/failed。
+- 定案（用户推荐）：
+  - **附件解析**：不建 analysis_tasks，只更新 `document_attachments.parse_status` 五态（pending→parsing→succeeded/failed/manual_review）；失败置 `failed`，重试=再次调用该接口。
+  - **analysis_tasks**：只承载某单据的一次整单风险分析；其 `parsing_attachments` 阶段顺带解析未成功附件（复用 parse_pipeline）。
+- 代码：`parse_attachment` 开头置 `parsing`；`_fail` 置 `failed`（manual_review 保留给"成功但需人工确认"）。
+- 文档：function-map §1.3/§2.3/§2.6、architecture §11 统一为"职责边界"表述。
+- 回归：pytest 16/16、冒烟 27/27。
+
+### 14:50 - 补齐扫描 PDF OCR 链路（用户抓出，功能缺口）
+- 缺口：原始只做"PDF→pypdf 文本提取"，扫描型（图片 PDF）无文字层拿不到内容，且把整份 PDF 字节直接塞给图片 OCR 接口，链路断裂；需求要求 PDF/PNG/JPG 都能 OCR + 原文定位。
+- 修复（`parse_pipeline`）：
+  - `_pdf_to_images(path)`：PyMuPDF 渲染每页为 PNG（`import pymupdf`，兼容旧 `fitz`）；
+  - `_content_sources(path, is_pdf, bytes)` 分流：文本型 PDF 有效文本（≥20 字符）直取；否则渲染页图逐页 OCR；
+  - `_parse_real_*` 逐页 OCR 聚合：合同/通用全文按页拼接 `[第N页]`，词条位置带 `page` 页码（原文定位到页）；发票逐页调专用识别、取首个识别出关键字段的结果。
+- `ocr_client.ocr_invoice/ocr_generic` 移除无用 `file_name` 参数（纯真实 API，只收图片字节）。
+- 新增 `tests/test_pdf_ocr.py`：4 条（文本 PDF 直取 / 扫描 PDF 无文字层 / 扫描 PDF 渲染出合法 PNG）。pytest 20/20、冒烟 27/27。
+- 文档：architecture §3 图 + §2 技术栈表 + §11 新增"PDF 双路径"；function-map §2.3；README 技术栈表。
+
+### 15:00 - 费用标准规则补齐职级维度（用户抓出）
+- 缺口：规则要求"类别×部门×职级×地区"，但 `users` 无职级字段，`financial_documents` 也不带，规则引擎拿不到"职级"。
+- 修复：按用户建议的简单方案，**`users` 新增 `position_level`**（staff/manager，seed 已给 5 个演示用户赋值）。
+- `check_expense_policy` 升级为**四维最精确匹配**：`_match_standard`（部门=预算部门、职级=申请人、地区=明细地点；维度指定不匹配则排除该标准，命中维度越多越优先，全空标准宽松兜底），finding 的 reference 里带命中维度。
+- seed 增加四维费用标准（销售部 staff/manager × 上海 × 住宿等）。
+- 新增 2 条单测（staff 超 staff 标准命中且匹配到带职级标准；manager 未超 manager 标准不命中）。pytest 22/22、冒烟 27/27。
+- 文档：architecture §10 补四维数据来源说明。
+
+### 15:10 - 市场价规则补齐规格维度（用户抓出）
+- 缺口：规则要求"名称×规格×地区×时间"，但 `document_line_items` 无 `specification`，规格匹配只是假装存在。
+- 修复：`document_line_items` 新增 `specification` 列；schema/`_line_items_out`/前端明细编辑器（新增"规格"输入列与展示列）同步。
+- `check_price` 升级为四维匹配：名称（双向包含）→ 规格（明细填了规格则优先精确匹配带相同规格的参考）→ 地区 → 时间（取 `effective_date` 不晚于消费日的参考，否则取最早）。finding 的 reference/evidence 带规格、地区、来源、生效日期。
+- seed：明细补规格（商务酒店 豪华大床房/标准间、机票 经济舱），新增"标准间 [300,600]"规格参考；演示档位不变。
+- 新增 2 条单测（标准间 500 命中规格档不误用豪华档不报险；豪华大床房 1500 超豪华档且 evidence 明确规格档）。pytest 24/24、冒烟 27/27。
+- 文档：architecture §10 补市场价四维数据来源。
+
+### 15:20 - JWT 撤销机制持久化（用户抓出）
+- 问题：撤销只是内存 `set`，服务重启即丢，与文档"访问令牌撤销机制"（2.7.14）不符；函数地图"涉及表"只写了 audit_logs，兜不住黑名单。
+- 修复（选用户给的 revoked_tokens 表方案）：
+  - 新增 **`revoked_tokens` 表**（`jti` 唯一、`expires_at`、`revoked_at`），登出/泄露时写入，重启不丢；内存 `_revoked_cache` set 仅作快速路径缓存。
+  - `security`：`revoke_token(db, token)` 写表、`is_token_revoked(db, jti)` 缓存→DB、`purge_revoked(db)` 顺带清过期；`decode_access_token` 只验签名/有效期。
+  - `deps.get_current_user` 校验撤销（401"令牌已撤销"）；`logout` 写表 + 审计。
+- 表数：25 规格 + 4 新增（risk_rules/expense_standards/sys_params/**revoked_tokens**）= **29 张**，实测 `Base.metadata.tables`=29。
+- 新增 `tests/test_security.py`（撤销写表可查/幂等/过期拒绝）；冒烟加"登出后旧令牌 401、其他令牌不受影响"（证明是逐令牌撤销）。pytest 27/27、冒烟 29/29。
+- 文档：architecture §6.2 加 revoked_tokens、表数 29、字段扩展补 position_level/specification；function-map §1.1/§2.9 改持久化表述。
+
+### 15:30 - 异步边界 / 状态名 / 模式标签收敛（用户三条意见）
+1. **异步只限单进程 Demo**：进程内 asyncio 队列多 worker 各一份、重启丢未完成任务。明确 `uvicorn --workers 1`；文档/README/DESIGN 统一话术："为降低 Demo 复杂度采用进程内异步队列，任务状态落库但队列不持久化，生产可平滑替换 Celery/RQ/消息队列"。
+2. **分析状态名对齐规格 2.7.12**：`analysis_tasks.task_status` 改为规格枚举 `queued → querying_document → loading_attachments → parsing_attachments → analyzing → succeeded/failed`（原实现 task_status="running"+current_step 分离；现用 `_stage()` 直接写 task_status，current_step 仅镜像）。seed 等待条件改为"非终态"；function-map/architecture 同步。修正 function-map 里残留的 `loading_document`。
+3. **DESIGN.md 收敛模式标签**：保留 6 个明确模式（策略/适配器/单例/责任链/装饰器-DI/工厂）；run_pipeline、前端轮询、router→service、SQL 封装移入"有味道不强贴 GoF"清单；附面试建议"少贴标签、多讲职责"。
+- 回归：pytest 27/27、冒烟 29/29、compile 通过。
 
 ### 下一步（由你决定）
 - [ ] 启动 Docker Desktop → 跑 MySQL 生产路径

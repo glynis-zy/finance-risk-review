@@ -31,6 +31,8 @@ Pydantic `schemas/*.py` 是内外边界：LLM 输出必须过 `ContractFields`/`
 ### 1.6 最小必要依赖
 不引 Celery/Redis/WebSocket/Vue/PDF库。异步用进程内 asyncio 队列 + 前端轮询；导出用 HTML。**中间件越少越可解释**。
 
+**异步边界（要主动说清楚）**：进程内 asyncio 队列**仅限单进程 Demo**——多 worker 时各进程有独立队列、重启丢未完成任务。分析任务**状态落库**（`analysis_tasks`），但队列本身不提供持久化。生产环境需 `uvicorn --workers 1`，可平滑替换为 Celery/RQ/消息队列。面试话术："为降低 Demo 复杂度采用进程内异步队列；状态落库、队列不持久化，生产可替换"，比自称"生产级异步任务系统"更专业。
+
 ### 1.7 纵深防御（三层权限）
 RBAC（能不能做）→ 数据权限（能看哪些行）→ 状态权限（什么状态能做什么）。任何一层不过即拒绝。
 
@@ -39,22 +41,31 @@ RBAC（能不能做）→ 数据权限（能看哪些行）→ 状态权限（�
 
 ---
 
-## 2. 设计模式（真实落点）
+## 2. 用到的设计模式（克制地贴标签）
 
-| 模式 | 代码位置 | 一句话 + 面试话术 |
+> 面试建议：模式名点到为止，多讲"职责是什么、为什么这样拆"，比贴一堆标签更不容易被追问打穿。
+
+### 2.1 明确使用的模式
+
+| 模式 | 代码位置 | 一句话 |
 |---|---|---|
-| **策略模式** | `rule_engine.REGISTRY` + `run_all()` | "风险规则是策略注册表，新增规则=注册一个函数，启停/阈值由 `risk_rules` 配置驱动，调用方零改动" |
-| **适配器模式** | `services/llm_client.py`、`services/ocr_client.py` | "外部厂商封装成统一接口，换厂商只改适配器和 `.env`" |
-| **模板方法** | `analysis_service.run_pipeline()` | "分析流程骨架固定（querying→loading→parsing→analyzing→report），各阶段可替换、状态可轮询" |
-| **责任链** | `perms`(L1) → `scopes`(L2) → 状态守卫(L3) | "权限三级校验依次执行，任一关不过即 4xx，既防越权又防越状态" |
-| **装饰器/DI** | `require_perm()` 依赖工厂 + FastAPI `Depends` | "权限作为依赖注入到路由签名，接口声明即权限声明" |
-| **单例（懒加载）** | `llm_client._get_client()`、`analysis_service._get_loop()` | "客户端/后台事件循环全局一份，首次调用才初始化" |
-| **工厂/注册表** | `parse_pipeline.recognize_document_type` + `build_context` | "按文档类别路由解析路径；聚合构造规则上下文" |
-| **门面 Facade** | `routers/*` → `services/*` | "路由是 service 的薄门面，业务不被 HTTP 细节污染" |
-| **观察者（拉取式）** | 前端轮询 `/analysis-tasks/{id}` | "无 WebSocket，任务状态由前端按需拉取" |
-| **Repository/DAO** | services 封装 SQLAlchemy 查询 | "业务不拼 SQL，查询收敛在 service" |
+| **策略模式** | `rule_engine.REGISTRY` + `run_all()` | 风险规则是策略注册表，新增规则=注册一个函数，启停/阈值由 `risk_rules` 配置驱动，调用方零改动 |
+| **适配器模式** | `services/llm_client.py`、`services/ocr_client.py` | 外部厂商封装成统一接口，换厂商只改适配器和 `.env` |
+| **单例（懒加载）** | `llm_client._get_client()`、`analysis_service._get_loop()` | 客户端/后台事件循环全局一份，首次调用才初始化 |
+| **责任链** | `perms`(L1) → `scopes`(L2) → 状态守卫(L3) | 权限三级校验依次执行，任一关不过即 4xx |
+| **装饰器/DI** | `require_perm()` 依赖工厂 + FastAPI `Depends` | 权限作为依赖注入到路由签名，接口声明即权限声明 |
+| **工厂/注册表** | `parse_pipeline.recognize_document_type` + `build_context` | 按文档类别路由解析路径；聚合构造规则上下文 |
 
-> 诚实的边界：没有用"状态模式"把单据状态机拆成状态类（当前用守卫表 + 显式 `_transition`，规模足够且更好讲）；没有用事件总线/消息队列（demo 量级轮询足够）。被问到就说"按规模选了更简单可解释的方案"。
+### 2.2 有"模式味道"，但不强贴 GoF 标签
+
+| 结构 | 实际是什么 |
+|---|---|
+| `run_pipeline()` 固定骨架 + 可替换阶段 | 有"模板方法"味道，但严格 GoF 模板方法要求子类覆写钩子；这里只是函数编排，不贴标签 |
+| 前端轮询 `/analysis-tasks/{id}` | 拉取式状态检查，不是观察者模式 |
+| `routers/*` → `services/*` | Controller/Service 分层：router 是控制器（收参/权限/回响应），service 是业务 |
+| services 封装 SQLAlchemy 查询 | Repository 风格：业务不拼 SQL，查询收敛在 service |
+
+> 诚实的边界：没有用"状态模式"把状态机拆成状态类（守卫表 + 显式 `_transition` 规模足够且更好讲）；没有用事件总线/消息队列（异步边界见 §1.6，Demo 选进程内队列）。被问到就答"按规模选了更简单可解释的方案"。
 
 ---
 
@@ -70,7 +81,7 @@ RBAC（能不能做）→ 数据权限（能看哪些行）→ 状态权限（�
 | `risk.low_bump_count` | 整体风险升级：low≥N 升 medium | 5 |
 | `attachment.max_size_mb` | 附件大小上限 | 10 |
 | `attachment.confidence_threshold` | OCR 置信度阈值 | 0.8 |
-| `ocr.mode` | auto=AUTO→预制→失败；preset=仅用预制 | auto |
+| `ocr.mode` | real=真实OCR/LLM失败即失败；auto=真实→失败回退预制；preset=仅预制不调外部API | auto |
 
 **管理端 API**：`/admin/users`、`/admin/roles/{id}/permissions`、`/admin/permissions`、`/admin/sys-params`。
 非管理员访问一律 403（冒烟测试已断言）。

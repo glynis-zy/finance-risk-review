@@ -99,7 +99,15 @@ check("审计日志", client.get("/api/v1/audit-logs", headers=hf).status_code =
 ap = client.get("/api/v1/documents/2", headers=h).status_code
 check("越权访问被拒(403/404)", ap in (403, 404), f"-> {ap}")
 
-# 14. 管理端（用户/角色/系统参数）
+# 14. 令牌撤销持久化（登出后该令牌失效，其他令牌不受影响）
+u2 = client.post("/api/v1/auth/login", json={"username": "lisi", "password": "123456"}).json()
+t2 = u2["access_token"]
+client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {t2}"})
+check("登出后旧令牌被拒(401)",
+      client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {t2}"}).status_code == 401)
+check("其他令牌不受影响", client.get("/api/v1/auth/me", headers=h).status_code == 200)
+
+# 15. 管理端（用户/角色/系统参数）
 admin = client.post("/api/v1/auth/login", json={"username": "admin", "password": "123456"}).json()
 ha = {"Authorization": f"Bearer {admin['access_token']}"}
 check("管理端用户列表", client.get("/api/v1/admin/users", headers=ha).status_code == 200)

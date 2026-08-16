@@ -12,3 +12,4 @@ openai>=1.30          # DeepSeek 为 OpenAI 兼容接口
 httpx>=0.27           # 百度云 OCR REST 调用
 python-dotenv>=1.0
 pypdf>=4.2            # 文本型 PDF 直接抽文本（免 OCR）
+PyMuPDF>=1.24         # 扫描型 PDF（图片PDF）渲染每页为图片后再 OCR

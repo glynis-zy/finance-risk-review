@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | POST `/api/v1/auth/login` | `login()` | `auth_service.authenticate()` | 校验密码（hash）→ 签发 JWT → 记录令牌 | users |
 | GET `/api/v1/auth/me` | `me()` | `auth_service.get_current_user()` | 当前用户 + 角色 + 权限集合 | users/user_roles/roles/role_permissions/permissions |
-| POST `/api/v1/auth/logout` | `logout()` | `auth_service.revoke_token()` | 令牌加入撤销清单（有效期/撤销机制，对应 2.7.14） | audit_logs |
+| POST `/api/v1/auth/logout` | `logout()` | `security.revoke_token(db, token)` | 写 `revoked_tokens` 表（jti 黑名单，**持久化重启不丢**）+ 审计 | revoked_tokens/audit_logs |
 
 ### 1.2 documents（单据）
 | 接口 | 处理函数 | 调用 service | 职责 | 涉及表 |
@@ -24,7 +24,7 @@
 | GET `/api/v1/documents/{id}` | `get_document()` | `document_service.get_detail()` | 单据+明细+附件+版本+审批进度 | 多表联查 |
 | PATCH `/api/v1/documents/{id}` | `update_document()` | `document_service.update()` | **仅 draft/returned 可改（L3）**；类型字段走 schema 校验 | financial_documents |
 | POST `/api/v1/documents/{id}/copy` | `copy_document()` | `document_service.copy()` | 复制为**新 draft**（新编号） | financial_documents |
-| POST `/api/v1/documents/{id}/submit` | `submit_document()` | `document_service.submit()` | 字段完整性校验 → **快照+新版本** → 建审批实例 → 建分析任务 | document_versions/approval_instances/analysis_tasks/status_logs |
+| POST `/api/v1/documents/{id}/submit` | `submit_document()` | `document_service.submit()` | 字段完整性校验 → **快照+新版本** → 建审批实例 → 建分析任务；draft=首次提交，returned=退回后重提交（同一接口，状态守卫放行两种状态） | document_versions/approval_instances/analysis_tasks/status_logs |
 | POST `/api/v1/documents/{id}/withdraw` | `withdraw_document()` | `document_service.withdraw()` | **仅 pending_review（L3）**；实例→cancelled，pending 任务→cancelled | document_status_logs/approval_instances/approval_tasks |
 | POST `/api/v1/documents/{id}/void` | `void_document()` | `document_service.void()` | 仅 draft/pending_review 可作废；终态 | document_status_logs |
 | POST `/api/v1/documents/{id}/line-items` | `add_line_item()` | `document_service.add_line_item()` | 按 item_type 校验 → 重算合计 | document_line_items |
@@ -38,7 +38,7 @@
 | POST `/api/v1/documents/{id}/attachments` | `upload_attachment()` | `attachment_service.save()` | 类型/大小/路径校验 → 存文件 → 算 hash | document_attachments |
 | GET `/api/v1/documents/{id}/attachments/{aid}` | `download_attachment()` | `attachment_service.stream()` | **鉴权后**流式返回文件 | document_attachments |
 | DELETE `/api/v1/documents/{id}/attachments/{aid}` | `delete_attachment()` | `attachment_service.delete()` | 仅 draft/returned 可删 | document_attachments |
-| POST `/api/v1/documents/{id}/attachments/{aid}/parse` | `create_parse_task()` | `parse_pipeline.enqueue()` | 入解析队列，状态→pending | analysis_tasks/attachment_parse_results |
+| POST `/api/v1/documents/{id}/attachments/{aid}/parse` | `trigger_parse()` | `parse_pipeline.parse_attachment()` | 直接解析单个附件，更新 `document_attachments.parse_status`（pending→parsing→succeeded/failed/manual_review）；**不创建 analysis_tasks**；失败可再次调用重试 | document_attachments/attachment_parse_results |
 
 ### 1.4 review-sessions（多轮对话）
 | 接口 | 处理函数 | 调用 service | 职责 | 涉及表 |
@@ -93,13 +93,17 @@
 `return_to_applicant(task)` / `reject(task)` / `list_my_tasks(user)`
 
 ### 2.3 parse_pipeline（解析流水线）
-`recognize_document_type(filename)` → `parse_attachment(att)` → `_ocr_invoice(path)` / `_ocr_generic(path)` / `_preset_lookup(att)` / `_extract_contract_fields(text)` / `_validate(fields, schema)` / `_evidence_positions(ocr_result)`
+`recognize_document_type(filename)` → `parse_attachment(att)` 按 `ocr.mode` 三模式编排：
+`preset`（直接 `_apply_preset`）／ `auto`（`_parse_real` 失败→回退 `_apply_preset`）／ `real`（只 `_parse_real`）
+→ `_content_sources(path, is_pdf, bytes)` 分流：文本型 PDF `_extract_text_pdf` 直取；扫描 PDF `_pdf_to_images`（PyMuPDF）渲染每页 → `_parse_real_*` 逐页 OCR（发票/合同/通用；合同走 `_extract_contract_fields`；位置带页码）／ `_full_preset_for` 命中预制
 
-### 2.4 ocr_client（OCR 适配层）
-`ocr_invoice(file)` → InvoiceFields
-`ocr_generic(file)` → {full_text, positions, confidence}
-`_preset_lookup(attachment)` → 命中 `demo/preset_parse/*.json` 则返回预置结果（fallback 第 2 级）
-`_fail(att)` → 置 `parse_status=failed`（fallback 第 3 级）
+> **职责边界**：只更新 `document_attachments.parse_status` 五态（pending/parsing/succeeded/failed/manual_review），**不创建 analysis_tasks**——那是整单风险分析的任务载体（§2.6）。
+
+### 2.4 ocr_client（OCR 适配层，纯真实 API）
+`ocr_invoice(file)` → InvoiceFields（发票专用识别，失败抛 `ParseFailure`）
+`ocr_generic(file)` → {full_text, positions, confidence}（通用识别，失败抛 `ParseFailure`）
+
+> 预制结果处理不在本层，由 `parse_pipeline` 按 `ocr.mode` 三模式编排（见 §2.3）。
 
 ### 2.5 llm_client（LLM 适配层）
 `extract_contract_fields(full_text) -> ContractFields`（Pydantic 校验，失败重试 1 次）
@@ -107,13 +111,18 @@
 `polish_risk_report(summary, findings) -> markdown`（只换表达，不改结论）
 
 ### 2.6 analysis_service（分析调度）
-`enqueue(document_id)` → asyncio 队列 → `run_pipeline(task)`:
+`enqueue(document_id)` → 进程内 asyncio 队列（**仅单进程有效**）→ `run_pipeline(task)`:
 ```
-loading_document → loading_attachments → parsing_attachments
-→ analyzing(rule_engine.run_all) → compute_overall_level(findings)   ← D2 公式
-→ report_service.generate(markdown) → succeeded
+task_status 对齐规格 2.7.12：
+queued → querying_document → loading_attachments → parsing_attachments
+      → analyzing(rule_engine.run_all) → compute_overall_level(findings)   ← D2 公式
+      → report_service.generate(markdown) → succeeded / failed
 ```
 `get_status/get_findings/get_report/compare_amounts/update_finding_status`
+
+> **边界**：队列只存在于当前进程，重启丢未完成任务；生产环境需 `uvicorn --workers 1` 运行，可平滑替换为 Celery/RQ/消息队列（任务状态已落库，队列本身不提供持久化）。
+
+> **analysis_tasks 只负责整单风险分析**（不是附件解析任务）；其 `parsing_attachments` 阶段顺带解析 `parse_status != succeeded` 的附件（复用 `parse_pipeline`，只更新附件 parse_status）。
 
 ### 2.7 rule_engine（规则引擎）
 `REGISTRY: dict[rule_code, fn]` + `run_all(ctx) -> list[Finding]` + `load_config(risk_rules)`。
@@ -137,7 +146,7 @@ loading_document → loading_attachments → parsing_attachments
 状态机槽位：`document_type / document_no`（存 review_sessions）；输入优先级：LLM NLU 成功→用；失败→规则匹配纯槽位问答。
 
 ### 2.9 auth_service / perms（权限）
-`authenticate / get_current_user / revoke_token`
+`authenticate / get_current_user`；撤销在 `core/security`：`revoke_token(db, token)`（写 `revoked_tokens`）、`is_token_revoked(db, jti)`（缓存→DB）、`purge_revoked(db)`（清过期）
 `require_perm(code)`（L1 装饰器）→ `scope_query(model)`（L2 数据权限过滤）→ 状态机守卫（L3，在 document/workflow service 内）。
 
 ---
@@ -162,7 +171,7 @@ loading_document → loading_attachments → parsing_attachments
 | 规则配置页 | `/rules` | RuleConfigView | RuleTable/ThresholdForm | rules.* |
 | 审核记录页 | `/records` | RecordsView | ReportTable/ManualReviewLog/AuditTable | reports.*, audit-logs |
 
-前端 api 层（`src/api/`）：auth / documents / lineItems / attachments / sessions / analysis / approvals / workflows / rules / suppliers / reports / audit，一个模块对应一个后端 router。
+前端 api 层（`frontend/js/api.js`）：auth / documents / lineItems / attachments / sessions / analysis / approvals / workflows / rules / suppliers / reports / audit，一个模块对应一个后端 router。
 
 ---
 
@@ -171,12 +180,11 @@ loading_document → loading_attachments → parsing_attachments
 | 动作 | 允许的当前状态 | 迁移后状态 |
 |---|---|---|
 | 编辑 update | draft, returned | 不变 |
-| 提交 submit | draft | pending_review |
+| 提交/重提交 submit | draft, returned | pending_review |
 | 撤回 withdraw | pending_review | withdrawn |
 | 作废 void | draft, pending_review | voided |
 | 退回 return | pending_review, reviewing | returned |
 | 驳回 reject | pending_review, reviewing | rejected |
-| 重提交 resubmit | returned | pending_review |
 | 审批通过 approve（末节点） | reviewing | approved |
 
 守卫统一在 `_transition()` 内：**状态不合法 → 抛 409 + 可读错误**，前端据此禁用按钮。

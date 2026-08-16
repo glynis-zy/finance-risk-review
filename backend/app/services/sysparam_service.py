@@ -16,7 +16,7 @@ DEFAULTS: dict[str, tuple[str, str]] = {
     "risk.low_bump_count": ("5", "整体风险升级：low 数量达到该值则升 medium"),
     "attachment.max_size_mb": ("10", "附件大小上限（MB）"),
     "attachment.confidence_threshold": ("0.8", "OCR 置信度阈值（附件完整性规则）"),
-    "ocr.mode": ("auto", "auto=AUTO→预制→失败；preset=仅用预制结果"),
+    "ocr.mode": ("auto", "real=真实OCR/LLM失败即失败；auto=真实→失败回退预制；preset=仅预制不调外部API"),
 }
 
 

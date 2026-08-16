@@ -7,9 +7,7 @@
 3. 其余情况 → 抛 ParseFailure（上层置 parse_status=failed / manual_review）。
 """
 import base64
-import json
 import logging
-from pathlib import Path
 
 import httpx
 
@@ -21,7 +19,7 @@ _access_token: str | None = None
 
 
 class ParseFailure(Exception):
-    """解析失败（无 API、调用失败、无预制案例）。"""
+    """解析失败（无 API 配置、调用失败）。"""
 
 
 async def _get_access_token() -> str:
@@ -46,29 +44,10 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def _preset_for(file_name: str) -> dict | None:
-    """命中预制解析案例（demo/preset_parse/<文件名>.json）。"""
-    base = Path(file_name).stem
-    preset_dir = Path(settings.preset_parse_dir)
-    candidates = [
-        preset_dir / f"{file_name}.json",
-        preset_dir / f"{base}.json",
-        preset_dir / f"{base}.ocr.json",
-    ]
-    for p in candidates:
-        if p.exists():
-            with open(p, encoding="utf-8") as f:
-                return json.load(f)
-    return None
-
-
-async def ocr_invoice(file_bytes: bytes, file_name: str) -> dict:
-    """增值税发票识别 → 规整字段 dict。"""
-    preset = _preset_for(file_name)
-    if preset:
-        return preset
+async def ocr_invoice(file_bytes: bytes) -> dict:
+    """增值税发票识别 → 规整字段 dict（纯真实 API，失败抛 ParseFailure）。"""
     if not settings.ocr_api_key:
-        raise ParseFailure("OCR API 未配置且无预制案例")
+        raise ParseFailure("OCR API 未配置（real/auto 模式需要 key）")
     try:
         token = await _get_access_token()
         async with httpx.AsyncClient(timeout=30) as client:
@@ -105,13 +84,10 @@ async def ocr_invoice(file_bytes: bytes, file_name: str) -> dict:
         raise ParseFailure(str(exc)) from exc
 
 
-async def ocr_generic(file_bytes: bytes, file_name: str) -> dict:
-    """通用文字识别（含文字位置）→ {full_text, positions, confidence}。"""
-    preset = _preset_for(file_name)
-    if preset:
-        return preset
+async def ocr_generic(file_bytes: bytes) -> dict:
+    """通用文字识别（含文字位置）→ {full_text, positions, confidence}（纯真实 API）。"""
     if not settings.ocr_api_key:
-        raise ParseFailure("OCR API 未配置且无预制案例")
+        raise ParseFailure("OCR API 未配置（real/auto 模式需要 key）")
     try:
         token = await _get_access_token()
         async with httpx.AsyncClient(timeout=30) as client:

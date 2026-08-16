@@ -3,7 +3,7 @@
 
 流程：识别文档类型 → 文本型 PDF 直接抽文本（免 OCR）→ 否则走 OCR 适配层
 → 合同类再交 LLM 结构化提取（Pydantic 校验）→ 写 AttachmentParseResult / InvoiceRecord。
-失败 → parse_status=failed/manual_review，允许重试。
+只更新 document_attachments.parse_status（五态），不创建 analysis_tasks；失败可重试。
 """
 import json
 import logging
@@ -42,7 +42,7 @@ def recognize_document_type(file_name: str) -> str:
 
 
 def _extract_text_pdf(path: Path) -> str | None:
-    """文本型 PDF 直接抽全文；图片型/失败返回 None（走 OCR）。"""
+    """文本型 PDF 直接抽全文；图片型/失败返回 None（走渲染 OCR）。"""
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -53,6 +53,44 @@ def _extract_text_pdf(path: Path) -> str | None:
         return text or None
     except Exception:  # noqa: BLE001
         return None
+
+
+# 文本型 PDF 至少要有这么多有效字符；否则视为"扫描件"（图片 PDF）走渲染 OCR
+_TEXT_MIN_LEN = 20
+
+
+def _pdf_to_images(path: Path, dpi: int = 150) -> list[bytes]:
+    """扫描型 PDF（图片 PDF）：用 PyMuPDF 渲染每页为 PNG bytes，供逐页 OCR。"""
+    try:
+        import pymupdf  # PyMuPDF>=1.24 推荐入口
+    except ImportError:
+        try:
+            import fitz as pymupdf  # 旧版入口
+        except ImportError:
+            logger.warning("PyMuPDF 未安装，扫描 PDF 无法转图 OCR")
+            return []
+    try:
+        doc = pymupdf.open(str(path))
+        images = [page.get_pixmap(dpi=dpi).tobytes("png") for page in doc]
+        doc.close()
+        return images
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PDF 渲染失败: %s", exc)
+        return []
+
+
+def _content_sources(path: Path, is_pdf: bool, file_bytes: bytes) -> tuple[str | None, list[bytes]]:
+    """返回 (有效文本, 页图列表)。
+
+    PDF：有有效文本→直接用文本；无文本/文本太少→渲染每页转图片走 OCR。
+    PNG/JPG：直接作为单页图片走 OCR。
+    """
+    if is_pdf:
+        text = _extract_text_pdf(path)
+        if text and len(text.strip()) >= _TEXT_MIN_LEN:
+            return text, []
+        return None, _pdf_to_images(path)
+    return None, [file_bytes]
 
 
 def _full_preset_for(file_name: str) -> dict | None:
@@ -69,29 +107,51 @@ def _full_preset_for(file_name: str) -> dict | None:
 
 
 async def parse_attachment(db: Session, attachment: DocumentAttachment) -> dict:
-    """解析单个附件并落表。返回 {ok, category} 供上层判断。
+    """按 ocr.mode 三模式解析（用户定义，见 DESIGN.md §3）：
 
-    ocr.mode 系统参数：preset=仅用预制结果（演示确定性）；auto=AUTO→预制→失败。
+    - real  : 真实 OCR/LLM，失败即失败（不查预制）；
+    - auto  : 真实 OCR/LLM，失败后回退预制，再失败；
+    - preset: 直接用预制结果，不调用任何外部 API。
+
+    命中预制即直接落表（跳过 OCR 与 LLM）。返回 {ok, category} 供上层判断。
+
+    附件解析不创建 analysis_tasks（那是整单风险分析的任务载体）：
+    本函数只更新 document_attachments.parse_status（五态：
+    pending→parsing→succeeded / failed / manual_review），失败可再次调用重试。
     """
     from app.services import sysparam_service
+    attachment.parse_status = "parsing"
+    db.flush()
     mode = sysparam_service.get(db, "ocr.mode", "auto")
     preset = _full_preset_for(attachment.file_name)
-    if preset:
-        _apply_preset(db, attachment, preset)
-        return {"ok": True, "category": preset.get("category")}
-    if mode == "preset":
-        return _fail(db, attachment, "unknown", f"preset 模式未命中预制案例: {attachment.file_name}")
 
+    if mode == "preset":
+        if preset:
+            _apply_preset(db, attachment, preset)
+            return {"ok": True, "category": preset.get("category")}
+        return _fail(db, attachment, recognize_document_type(attachment.file_name),
+                     f"preset 模式未命中预制案例: {attachment.file_name}")
+
+    try:
+        return await _parse_real(db, attachment)
+    except ocr_client.ParseFailure as exc:
+        if mode == "auto" and preset:
+            _apply_preset(db, attachment, preset)
+            return {"ok": True, "category": preset.get("category")}
+        return _fail(db, attachment, recognize_document_type(attachment.file_name), str(exc))
+
+
+async def _parse_real(db, attachment) -> dict:
+    """真实解析路径：按文档类别分发（OCR + 合同 LLM 提取），失败抛 ParseFailure。"""
+    category = recognize_document_type(attachment.file_name)
     path = Path(settings.file_storage_path) / attachment.file_path
     file_bytes = path.read_bytes() if path.exists() else b""
-    category = recognize_document_type(attachment.file_name)
     is_pdf = attachment.file_type == "pdf"
-
     if category == "invoice":
-        return await _parse_invoice(db, attachment, file_bytes, path, is_pdf)
+        return await _parse_real_invoice(db, attachment, file_bytes, path, is_pdf)
     if category == "contract":
-        return await _parse_contract(db, attachment, file_bytes, path, is_pdf)
-    return await _parse_generic(db, attachment, file_bytes, path, is_pdf, category)
+        return await _parse_real_contract(db, attachment, file_bytes, path, is_pdf)
+    return await _parse_real_generic(db, attachment, file_bytes, path, is_pdf, category)
 
 
 def _apply_preset(db: Session, attachment: DocumentAttachment, preset: dict) -> None:
@@ -105,18 +165,21 @@ def _apply_preset(db: Session, attachment: DocumentAttachment, preset: dict) -> 
     _succeed(db, attachment)
 
 
-async def _parse_invoice(db, attachment, file_bytes, path, is_pdf) -> dict:
+async def _parse_real_invoice(db, attachment, file_bytes, path, is_pdf) -> dict:
+    text, images = _content_sources(path, is_pdf, file_bytes)
     fields = None
-    if is_pdf:
-        text = _extract_text_pdf(path)
-        if text:
-            fields = _parse_invoice_from_text(text)
+    if text:
+        fields = _parse_invoice_from_text(text)
     if fields is None:
-        try:
-            data = await ocr_client.ocr_invoice(file_bytes, attachment.file_name)
-            fields = _norm_invoice(data)
-        except ocr_client.ParseFailure as exc:
-            return _fail(db, attachment, "invoice", str(exc))
+        # 文本无效 / 扫描 PDF / 图片 → 逐页 OCR 发票，取第一个识别出关键字段的结果
+        for page_bytes in images:
+            data = await ocr_client.ocr_invoice(page_bytes)
+            cand = _norm_invoice(data)
+            if cand.get("invoice_no") or cand.get("amount_including_tax") is not None:
+                fields = cand
+                break
+        if fields is None:
+            raise ocr_client.ParseFailure("发票 OCR 未识别出有效字段")
 
     _write_parse(db, attachment, "invoice", None, fields, [], fields.get("confidence"))
     db.add(_make_invoice(attachment.id, fields))
@@ -124,41 +187,57 @@ async def _parse_invoice(db, attachment, file_bytes, path, is_pdf) -> dict:
     return {"ok": True, "category": "invoice"}
 
 
-async def _parse_contract(db, attachment, file_bytes, path, is_pdf) -> dict:
-    full_text = _extract_text_pdf(path) if is_pdf else None
-    positions, confidence = [], (0.98 if full_text else None)
-    if full_text is None:
-        try:
-            ocr = await ocr_client.ocr_generic(file_bytes, attachment.file_name)
-            full_text = ocr.get("full_text", "")
-            positions = ocr.get("positions", [])
-            confidence = ocr.get("confidence")
-        except ocr_client.ParseFailure as exc:
-            return _fail(db, attachment, "contract", str(exc))
-    if not full_text:
-        return _fail(db, attachment, "contract", "未提取到合同文本")
+async def _parse_real_contract(db, attachment, file_bytes, path, is_pdf) -> dict:
+    text, images = _content_sources(path, is_pdf, file_bytes)
+    full_text = text or ""
+    positions: list[dict] = []
+    confidences: list[float] = []
+    if not text:
+        # 扫描 PDF / 图片：逐页 OCR 并聚合全文，位置带页码（原文定位）
+        for idx, page_bytes in enumerate(images, 1):
+            ocr = await ocr_client.ocr_generic(page_bytes)
+            page_text = ocr.get("full_text", "")
+            if not page_text:
+                continue
+            if full_text:
+                full_text += "\n"
+            full_text += f"[第{idx}页]\n" + page_text
+            positions += [{"page": idx, **p} for p in ocr.get("positions", [])]
+            if ocr.get("confidence"):
+                confidences.append(ocr["confidence"])
+        if not full_text:
+            raise ocr_client.ParseFailure("合同 OCR 未提取到文本")
 
+    confidence = min(confidences) if confidences else (0.98 if text else None)
     cf = llm_client.extract_contract_fields(full_text)
     if cf is None:
-        return _fail(db, attachment, "contract", "合同字段提取失败", full_text=full_text)
+        raise ocr_client.ParseFailure("合同字段提取失败")
     _write_parse(db, attachment, "contract", full_text, cf.model_dump(), positions, confidence)
     _succeed(db, attachment)
     return {"ok": True, "category": "contract"}
 
 
-async def _parse_generic(db, attachment, file_bytes, path, is_pdf, category) -> dict:
-    full_text = _extract_text_pdf(path) if is_pdf else None
-    positions, confidence = [], (0.98 if full_text else None)
-    if full_text is None:
-        try:
-            ocr = await ocr_client.ocr_generic(file_bytes, attachment.file_name)
-            full_text = ocr.get("full_text", "")
-            positions = ocr.get("positions", [])
-            confidence = ocr.get("confidence")
-        except ocr_client.ParseFailure as exc:
-            return _fail(db, attachment, category, str(exc))
-    if not full_text:
-        return _fail(db, attachment, category, "未提取到文本")
+async def _parse_real_generic(db, attachment, file_bytes, path, is_pdf, category) -> dict:
+    text, images = _content_sources(path, is_pdf, file_bytes)
+    full_text = text or ""
+    positions: list[dict] = []
+    confidences: list[float] = []
+    if not text:
+        for idx, page_bytes in enumerate(images, 1):
+            ocr = await ocr_client.ocr_generic(page_bytes)
+            page_text = ocr.get("full_text", "")
+            if not page_text:
+                continue
+            if full_text:
+                full_text += "\n"
+            full_text += f"[第{idx}页]\n" + page_text
+            positions += [{"page": idx, **p} for p in ocr.get("positions", [])]
+            if ocr.get("confidence"):
+                confidences.append(ocr["confidence"])
+        if not full_text:
+            raise ocr_client.ParseFailure("未提取到文本")
+
+    confidence = min(confidences) if confidences else (0.98 if text else None)
     _write_parse(db, attachment, category, full_text, None, positions, confidence)
     _succeed(db, attachment)
     return {"ok": True, "category": category}
@@ -188,7 +267,8 @@ def _fail(db, attachment, category, message: str, full_text: str | None = None) 
         full_text=full_text,
         fields_json={"error": message},
     ))
-    attachment.parse_status = "manual_review"  # 人工复核入口，可重试
+    # 解析失败置 failed（可重试）；manual_review 保留给"解析成功但需人工确认"场景
+    attachment.parse_status = "failed"
     logger.warning("parse failed: %s %s", attachment.file_name, message)
     return {"ok": False, "category": category, "error": message}
 

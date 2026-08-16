@@ -118,8 +118,16 @@ def get_status(db: Session, user: User, task_id: int) -> dict:
 
 
 def mark_started(db: Session, task: AnalysisTask) -> None:
-    task.task_status = "running"
     task.started_at = datetime.utcnow()
+
+
+def _stage(db: Session, task: AnalysisTask, name: str) -> None:
+    """推进分析任务阶段：task_status 对齐规格 2.7.12 枚举
+    （queued → querying_document → loading_attachments → parsing_attachments
+     → analyzing → succeeded/failed）。current_step 保留为镜像，兼容轮询前端。"""
+    task.task_status = name
+    task.current_step = name
+    db.commit()
 
 
 def mark_failed(db: Session, task: AnalysisTask, message: str) -> None:
@@ -167,8 +175,7 @@ async def run_pipeline(task_id: int) -> None:
         if task is None:
             return
         mark_started(db, task)
-        task.current_step = "querying_document"
-        db.commit()
+        _stage(db, task, "querying_document")
 
         doc = db.get(FinancialDocument, task.document_id)
         if doc is None:
@@ -176,20 +183,17 @@ async def run_pipeline(task_id: int) -> None:
             db.commit()
             return
 
-        task.current_step = "loading_attachments"
-        db.commit()
+        _stage(db, task, "loading_attachments")
         attachments = list(db.scalars(select(DocumentAttachment).where(
             DocumentAttachment.document_id == doc.id)).all())
 
-        task.current_step = "parsing_attachments"
-        db.commit()
+        _stage(db, task, "parsing_attachments")
         for att in attachments:
             if att.parse_status != "succeeded":
                 await parse_pipeline.parse_attachment(db, att)
                 db.commit()
 
-        task.current_step = "analyzing"
-        db.commit()
+        _stage(db, task, "analyzing")
         from app.services import sysparam_service
         ctx = rule_engine.build_context(db, doc)
         findings = rule_engine.run_all(ctx)

@@ -37,6 +37,7 @@ from app.models.document import (  # noqa: E402
 from app.models.reference import (  # noqa: E402
     ExpenseStandard, MarketPriceReference, RiskRule, SupplierProfile, SysParam,
 )
+from app.models.revoked import RevokedToken  # noqa: E402
 from app.models.session import ReviewSession, SessionMessage  # noqa: E402
 from app.models.user import Permission, Role, RolePermission, User, UserRole  # noqa: E402
 from app.models.workflow import (  # noqa: E402
@@ -111,11 +112,11 @@ ROLE_PERMS = {
 }
 
 USERS = [
-    ("zhangsan", "张三", "applicant"),
-    ("lisi", "李四", "applicant"),
-    ("wangwu", "王五", "approver"),
-    ("zhaoliu", "赵六", "finance"),
-    ("admin", "管理员", "admin"),
+    ("zhangsan", "张三", "applicant", "manager"),
+    ("lisi", "李四", "applicant", "staff"),
+    ("wangwu", "王五", "approver", "manager"),
+    ("zhaoliu", "赵六", "finance", "staff"),
+    ("admin", "管理员", "admin", "manager"),
 ]
 
 RULE_CONFIGS = {
@@ -139,7 +140,7 @@ def wipe(db) -> None:
               ApprovalWorkflow, InvoiceRecord, AttachmentParseResult, DocumentAttachment,
               DocumentStatusLog, DocumentVersion, DocumentLineItem, FinancialDocument,
               ExpenseStandard, MarketPriceReference, SupplierProfile, RiskRule,
-              AuditLog, RolePermission, UserRole, Permission, Role, User]
+              RevokedToken, AuditLog, RolePermission, UserRole, Permission, Role, User]
     for t in tables:
         db.execute(delete(t))
     db.commit()
@@ -162,9 +163,10 @@ def seed_identity(db) -> dict[str, User]:
             if role_code == "admin" or code in codes:
                 db.add(RolePermission(role_id=role.id, permission_id=perm.id))
     users = {}
-    for username, display, role_code in USERS:
+    for username, display, role_code, level in USERS:
         u = User(username=username, display_name=display,
-                 password_hash=hash_password("123456"), status="active")
+                 password_hash=hash_password("123456"), status="active",
+                 position_level=level)
         db.add(u)
         db.flush()
         db.add(UserRole(user_id=u.id, role_id=roles[role_code].id))
@@ -205,15 +207,32 @@ def seed_rules_and_reference(db) -> None:
     for code, cfg in RULE_CONFIGS.items():
         db.add(RiskRule(rule_code=code, rule_name=code, enabled=True,
                         config_json=cfg, applies_to_json=None))
+    # 通用标准（宽松兜底）
     db.add(ExpenseStandard(expense_category="餐饮", standard_amount=Decimal("500"),
                            currency="CNY", effective_date=date(2026, 1, 1)))
     db.add(ExpenseStandard(expense_category="住宿", standard_amount=Decimal("600"),
                            currency="CNY", effective_date=date(2026, 1, 1)))
     db.add(ExpenseStandard(expense_category="交通", standard_amount=Decimal("800"),
                            currency="CNY", effective_date=date(2026, 1, 1)))
+    # 四维标准：类别×部门×职级×地区（越精确越优先）
+    db.add(ExpenseStandard(expense_category="住宿", department="销售部", position_level="staff",
+                           region="上海", standard_amount=Decimal("500"),
+                           currency="CNY", effective_date=date(2026, 1, 1)))
+    db.add(ExpenseStandard(expense_category="住宿", department="销售部", position_level="manager",
+                           region="上海", standard_amount=Decimal("800"),
+                           currency="CNY", effective_date=date(2026, 1, 1)))
+    db.add(ExpenseStandard(expense_category="餐饮", position_level="staff",
+                           standard_amount=Decimal("400"), currency="CNY",
+                           effective_date=date(2026, 1, 1)))
+    db.add(ExpenseStandard(expense_category="餐饮", position_level="manager",
+                           standard_amount=Decimal("600"), currency="CNY",
+                           effective_date=date(2026, 1, 1)))
     db.add(MarketPriceReference(item_name="商务酒店", price_min=Decimal("300"),
                                 price_max=Decimal("800"), currency="CNY",
                                 source_name="携程均价", effective_date=date(2026, 8, 1)))
+    db.add(MarketPriceReference(item_name="商务酒店", specification="标准间",
+                                price_min=Decimal("300"), price_max=Decimal("600"), currency="CNY",
+                                source_name="携程均价·标准间", effective_date=date(2026, 8, 1)))
     db.add(MarketPriceReference(item_name="机票", specification="北京-上海",
                                 price_min=Decimal("800"), price_max=Decimal("1800"),
                                 currency="CNY", source_name="航司均价", effective_date=date(2026, 8, 1)))
@@ -340,7 +359,7 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
     db.add(d4); db.flush()
     wk = today - timedelta(days=4)  # 工作日
     db.add(DocumentLineItem(document_id=d4.id, item_type="expense", item_name="商务酒店",
-                            expense_date=wk, expense_location="上海",
+                            specification="豪华大床房", expense_date=wk, expense_location="上海",
                             unit_price=Decimal("1200"), amount=Decimal("1200")))
     db.add(DocumentLineItem(document_id=d4.id, item_type="expense", item_name="市内交通",
                             expense_date=wk, expense_location="上海",
@@ -367,11 +386,11 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
     )
     db.add(d5); db.flush()
     db.add(DocumentLineItem(document_id=d5.id, item_type="expense", item_name="机票",
-                            expense_date=today - timedelta(days=5), unit_price=Decimal("2000"),
-                            amount=Decimal("2000")))
+                            specification="经济舱", expense_date=today - timedelta(days=5),
+                            unit_price=Decimal("2000"), amount=Decimal("2000")))
     db.add(DocumentLineItem(document_id=d5.id, item_type="expense", item_name="商务酒店",
-                            expense_date=today - timedelta(days=4), unit_price=Decimal("550"),
-                            amount=Decimal("550")))
+                            specification="标准间", expense_date=today - timedelta(days=4),
+                            unit_price=Decimal("550"), amount=Decimal("550")))
     db.add(DocumentLineItem(document_id=d5.id, item_type="expense", item_name="餐饮",
                             expense_date=today - timedelta(days=4), unit_price=Decimal("400"),
                             amount=Decimal("400")))
@@ -399,10 +418,11 @@ def submit_all(db, docs) -> None:
         document_service.submit(db, user, doc.id)
         print(f"[seed] 已提交 {doc.document_no} -> {doc.document_status}")
     # 等待后台分析全部进入终态（succeeded/failed/cancelled），最多 60s
+    terminal = {"succeeded", "failed", "cancelled"}
     deadline = time.time() + 60
     while time.time() < deadline:
         pending = db.scalars(select(AnalysisTask).where(
-            AnalysisTask.task_status.in_(["queued", "running"]))).all()
+            AnalysisTask.task_status.notin_(terminal))).all()
         if not pending:
             break
         time.sleep(0.5)

@@ -14,6 +14,7 @@ class User(TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), default="active")
+    position_level: Mapped[str] = mapped_column(String(32), default="staff")  # 职级：费用标准规则维度
 
 
 class Role(TimestampMixin, Base):
