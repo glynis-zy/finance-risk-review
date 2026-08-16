@@ -105,9 +105,8 @@ def compare_amounts(db: Session, user: User, doc_id: int) -> AmountComparisonOut
 
 
 def get_status(db: Session, user: User, task_id: int) -> dict:
+    _visible_task(db, user, task_id)  # L2：task 对应 document 必须对当前用户可见
     task = db.get(AnalysisTask, task_id)
-    if task is None:
-        raise HTTPException(404, "分析任务不存在")
     return {
         "task_id": task.id,
         "task_status": task.task_status,

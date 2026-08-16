@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
 from app.core.perms import require_perm
-from app.models.analysis import RiskFinding
+from app.core.scopes import visible_document_ids
+from app.models.analysis import AnalysisTask, RiskFinding
 from app.models.user import User
 from app.services import audit_service
 
@@ -29,6 +30,12 @@ def update_finding_status(
     finding = db.get(RiskFinding, finding_id)
     if finding is None:
         raise HTTPException(404, "风险项不存在")
+    # L2：风险项所属分析任务对应 document 必须对当前用户可见
+    task = db.get(AnalysisTask, finding.task_id)
+    if task is not None:
+        ids = visible_document_ids(db, user)
+        if ids is not None and task.document_id not in ids:
+            raise HTTPException(403, "无权访问该风险项")
     finding.review_status = payload.review_status
     audit_service.log(db, user, "finding:review_status", "risk_finding",
                       str(finding_id), {"review_status": payload.review_status})

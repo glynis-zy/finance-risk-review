@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.scopes import get_role_codes, visible_document_ids
 from app.document_schemas import REQUIRED_ATTACHMENTS, TYPE_LABELS, validate_type_fields
 from app.models.analysis import AnalysisTask
-from app.models.attachment import DocumentAttachment
+from app.models.attachment import AttachmentParseResult, DocumentAttachment
 from app.models.document import (
     DOCUMENT_TYPES,
     DocumentLineItem,
@@ -91,11 +91,11 @@ def _transition(db: Session, doc: FinancialDocument, to_status: str,
     doc.document_status = to_status
 
 
-def _snapshot(db: Session, doc: FinancialDocument, operator: User) -> None:
-    """提交/重提交时保存当前版本快照，版本号 +1。"""
+def _snapshot(db: Session, doc: FinancialDocument, operator: User, version_no: int) -> None:
+    """保存一次正式提交的版本快照（P0-3：version_no 与 current_version 对齐，无 off-by-one）。"""
     db.add(DocumentVersion(
         document_id=doc.id,
-        version_no=doc.current_version,
+        version_no=version_no,
         document_snapshot_json={
             "type": doc.document_type,
             "no": doc.document_no,
@@ -106,7 +106,6 @@ def _snapshot(db: Session, doc: FinancialDocument, operator: User) -> None:
         },
         created_by=operator.id,
     ))
-    doc.current_version += 1
 
 
 def ensure_editable(db: Session, user: User, doc_id: int) -> FinancialDocument:
@@ -218,10 +217,20 @@ def submit(db: Session, user: User, doc_id: int) -> FinancialDocument:
     _validate_completeness(db, doc)
 
     is_resubmit = doc.document_status == RETURNED
-    _snapshot(db, doc, user)          # 新版本（version_no +1）
+    # 版本语义（P0-3）：current_version=最近一次正式提交版本；本次提交版本 = 上一版 + 1
+    new_version = doc.current_version + 1
+    _snapshot(db, doc, user, new_version)
+    doc.current_version = new_version
+    # 暂存附件（document_version=0）绑定到本次提交版本，可追溯进入系统的版本
+    for a in db.scalars(select(DocumentAttachment).where(
+            DocumentAttachment.document_id == doc.id,
+            DocumentAttachment.document_version == 0,
+    )).all():
+        a.document_version = new_version
+
     _transition(db, doc, PENDING, user, "退回后重新提交" if is_resubmit else "提交审批")
 
-    # 建审批实例 + 首个任务；建分析任务（异步）
+    # 建审批实例（document_version 取 current_version=本次版本）+ 分析任务
     workflow_service.start_approval(db, doc)
     task = analysis_service.create_task(db, doc.id)
 
@@ -269,6 +278,29 @@ def void(db: Session, user: User, doc_id: int) -> FinancialDocument:
     doc = _ensure_visible(db, user, doc_id)
     _ensure_owner(db, user, doc)
     _guard(doc, "void")
+
+    if doc.document_status == PENDING:
+        # P0-2：作废审批中单据 → 取消进行中审批实例与待处理任务
+        instances = db.scalars(select(ApprovalInstance).where(
+            ApprovalInstance.document_id == doc.id,
+            ApprovalInstance.instance_status == "running",
+        )).all()
+        for inst in instances:
+            inst.instance_status = "cancelled"
+            inst.finished_at = datetime.utcnow()
+            for t in db.scalars(select(ApprovalTask).where(
+                    ApprovalTask.instance_id == inst.id,
+                    ApprovalTask.task_status == "pending",
+            )).all():
+                t.task_status = "cancelled"
+                t.processed_at = datetime.utcnow()
+        # 必要时取消尚未开始的分析任务
+        for t in db.scalars(select(AnalysisTask).where(
+                AnalysisTask.document_id == doc.id,
+                AnalysisTask.task_status.in_(["queued", "querying_document"]),
+        )).all():
+            t.task_status = "cancelled"
+
     _transition(db, doc, VOIDED, user, "作废")
     audit_service.log(db, user, "document:void", "document", str(doc.id))
     db.commit()
@@ -383,16 +415,27 @@ def delete_line_item(db: Session, user: User, doc_id: int, item_id: int) -> None
 # ---------- 内部工具 ----------
 
 def _validate_completeness(db: Session, doc: FinancialDocument) -> None:
-    """提交前完整性校验（规格 2.7.5）：必需类型字段、必需附件数量。"""
+    """提交前完整性校验（规格 2.7.5）：必需类型字段、必需附件【类别】（P1-2，不能靠数量蒙混）。
+
+    附件类别来源：上传时按文件名识别的 `document_category` ∪ 已解析结果 `document_category`。
+    """
     required_attachments = REQUIRED_ATTACHMENTS.get(doc.document_type, [])
-    att_count = len(db.scalars(
-        select(DocumentAttachment.id).where(
+    present: set[str] = set()
+    for att in db.scalars(select(DocumentAttachment).where(
             DocumentAttachment.document_id == doc.id,
             DocumentAttachment.storage_status == "stored",
-        )
-    ).all())
-    if required_attachments and att_count < len(required_attachments):
-        raise HTTPException(400, f"缺少必需附件（需要: {'、'.join(required_attachments)}）")
+    )).all():
+        if att.document_category:
+            present.add(att.document_category)
+    for cat in db.scalars(select(AttachmentParseResult.document_category).where(
+            AttachmentParseResult.attachment_id.in_(
+                select(DocumentAttachment.id).where(DocumentAttachment.document_id == doc.id)
+            ))).all():
+        if cat:
+            present.add(cat)
+    missing = [c for c in required_attachments if c not in present]
+    if missing:
+        raise HTTPException(400, f"缺少必需附件类别: {'、'.join(missing)}")
     if doc.document_type == "batch_payment":
         item_count = len(db.scalars(
             select(DocumentLineItem.id).where(

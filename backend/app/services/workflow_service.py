@@ -74,12 +74,15 @@ def list_my_tasks(db: Session, user: User) -> list[ApprovalTask]:
     ).all())
 
 
-def approve(db: Session, user: User, task_id: int) -> dict:
+def approve(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
     instance = db.get(ApprovalInstance, task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
+    _ensure_processable(instance, document)
 
-    _mark_processing(db, document)
+    if review_comment:
+        task.review_comment = review_comment
+    _mark_processing(db, document, user.id)
     _finish_task(db, task, "approved")
 
     nodes = _workflow_nodes(db, instance.workflow_id)
@@ -89,43 +92,56 @@ def approve(db: Session, user: User, task_id: int) -> dict:
         nxt = nodes[current_idx + 1]
         instance.current_node_id = nxt.id
         _create_task(db, instance, nxt)
-        audit_service.log(db, user, "approval:approve", "approval_task", str(task.id))
+        audit_service.log(db, user, "approval:approve", "approval_task", str(task.id),
+                          {"comment": review_comment})
         db.commit()
         return {"result": "approved", "next_node": nxt.node_name}
 
     # 末节点通过 → 实例完成，单据 approved
     instance.instance_status = "approved"
     instance.finished_at = datetime.utcnow()
+    _status_log(db, document, "approved", user.id, "末节点审批通过")
     document.document_status = "approved"
-    audit_service.log(db, user, "approval:approve", "approval_task", str(task.id))
+    audit_service.log(db, user, "approval:approve", "approval_task", str(task.id),
+                      {"comment": review_comment})
     db.commit()
     return {"result": "approved", "next_node": None}
 
 
-def return_to_applicant(db: Session, user: User, task_id: int) -> dict:
+def return_to_applicant(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
     instance = db.get(ApprovalInstance, task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
+    _ensure_processable(instance, document)
 
-    _mark_processing(db, document)
+    if review_comment:
+        task.review_comment = review_comment
+    _mark_processing(db, document, user.id)
     _finish_task(db, task, RETURNED)
     _cancel_instance(db, instance, RETURNED)
+    _status_log(db, document, RETURNED, user.id, "审批退回")
     document.document_status = RETURNED
-    audit_service.log(db, user, "approval:return", "approval_task", str(task.id))
+    audit_service.log(db, user, "approval:return", "approval_task", str(task.id),
+                      {"comment": review_comment})
     db.commit()
     return {"result": "returned"}
 
 
-def reject(db: Session, user: User, task_id: int) -> dict:
+def reject(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
     instance = db.get(ApprovalInstance, task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
+    _ensure_processable(instance, document)
 
-    _mark_processing(db, document)
+    if review_comment:
+        task.review_comment = review_comment
+    _mark_processing(db, document, user.id)
     _finish_task(db, task, REJECTED)
     _cancel_instance(db, instance, REJECTED)
+    _status_log(db, document, "rejected", user.id, "审批驳回")
     document.document_status = "rejected"
-    audit_service.log(db, user, "approval:reject", "approval_task", str(task.id))
+    audit_service.log(db, user, "approval:reject", "approval_task", str(task.id),
+                      {"comment": review_comment})
     db.commit()
     return {"result": "rejected"}
 
@@ -189,17 +205,31 @@ def _create_task(db: Session, instance: ApprovalInstance, node: ApprovalWorkflow
     return task
 
 
-def _mark_processing(db: Session, document: FinancialDocument) -> None:
-    """首个任务被处理 → 单据进入 reviewing（function-map 状态机）。"""
+def _ensure_processable(instance: ApprovalInstance, document: FinancialDocument) -> None:
+    """P0-2：实例已结束 / 单据非审批中状态 → 拒绝处理旧任务。"""
+    if instance.instance_status != "running":
+        raise HTTPException(409, "审批实例已结束，无法处理该任务")
+    if document.document_status not in ("pending_review", "reviewing"):
+        raise HTTPException(409, f"单据状态 {document.document_status} 不允许审批操作")
+
+
+def _status_log(db: Session, document: FinancialDocument, to_status: str,
+                operator_id: int, remark: str = "") -> None:
+    """写单据状态日志，operator 必须是真实操作人（P1-3）。"""
+    from app.models.document import DocumentStatusLog
+    db.add(DocumentStatusLog(
+        document_id=document.id,
+        from_status=document.document_status,
+        to_status=to_status,
+        operator_id=operator_id,
+        remark=remark,
+    ))
+
+
+def _mark_processing(db: Session, document: FinancialDocument, operator_id: int) -> None:
+    """首个任务被处理 → 单据进入 reviewing；operator 记真实审批人（P1-3）。"""
     if document.document_status == "pending_review":
-        from app.models.document import DocumentStatusLog
-        db.add(DocumentStatusLog(
-            document_id=document.id,
-            from_status="pending_review",
-            to_status="reviewing",
-            operator_id=document.applicant_id,
-            remark="审批处理开始",
-        ))
+        _status_log(db, document, "reviewing", operator_id, "审批处理开始")
         document.document_status = "reviewing"
 
 

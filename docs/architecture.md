@@ -189,6 +189,7 @@ draft / pending_review ──作废──▶ voided
 
 补充规则：
 - **撤回**：仅允许当前节点任务尚未被处理时；`withdrawn` / `voided` / `rejected` 为终态。
+- **作废（P0-2 终态守卫）**：作废审批中单据会**取消 running 审批实例 + pending 任务 + 未开始分析任务**；`approve/return/reject` 除校验任务 `pending` 外，还必须校验实例 `running` 且单据状态 ∈ `pending_review/reviewing`——终态单据不会被旧审批任务再次迁移。
 - `reviewing` 是"实例运行中"期间的单据状态，避免与 `pending_review`（已提交待处理）混淆。
 
 审批实例状态：`pending → running → approved/returned/rejected/cancelled`
@@ -208,7 +209,7 @@ draft / pending_review ──作废──▶ voided
 否则                        → 整体 = max(单项等级)
 ```
 
-- 纯函数、确定性、可复现——同一份数据每次跑出相同结论。
+- 确定性、可复现——同一份数据每次跑出相同结论（规则无随机、无 LLM 调用，可读 DB/配置）。
 - 升级阈值（3 个 medium、5 个 low）存入 `risk_rules` 配置，可调。
 - 面试口径："整体等级=最高单项等级+数量升级，全部由规则引擎输出，不引入模型主观判断。"
 
@@ -228,7 +229,7 @@ draft / pending_review ──作废──▶ voided
 
 ## 10. 规则引擎（D3，10 条规则全实现）
 
-规则引擎 = **注册表 + 配置**。每条规则一个纯函数，签名统一：
+规则引擎 = **注册表 + 配置**。每条规则一个**确定性函数**（无随机、无 LLM 调用，可查 DB/配置），签名统一：
 
 ```python
 def check_rule(ctx: RuleContext) -> list[Finding]
@@ -282,16 +283,12 @@ LLM 提取：
 
 ## 12. 多轮对话模块（D8，已确认）
 
-对话 = **LLM NLU + 槽位状态机**：
+对话 = **LLM NLU → 本地规则槽位解析（fallback）→ 槽位状态机**（P1-1）：
 
-1. 用户输入自由文本 → LLM 抽取 `{document_type?, document_no?, intent?}`（Pydantic 校验）。
-2. 状态机按槽位决定下一步：
-   - 缺 `document_type` → 问类型；
-   - 缺 `document_no` → 问编号；
-   - 歧义/冲突 → 列候选请求确认；
-   - 槽位齐全 → 校验数据权限 → 查单据 → 创建/推进分析任务。
-3. LLM 解析失败 → 退回纯槽位问答（规则匹配输入）。
-4. 已确认槽位存 `review_sessions`（`document_type`/`document_no`），不重复询问（对应 2.7.6）。
+1. 用户输入自由文本 → LLM 抽取 `{document_type?, document_no?, intent?}`（Pydantic 校验）；**LLM 不可用/解析失败 → `_local_parse` 本地规则**（五类中文名/简称 + `CP/AP/BP/EX/TR-YYYYMMDD-NNN` 编号正则）。
+2. 槽位更新：用户显式纠正时覆盖旧槽位；已确认槽位不重复询问。
+3. 槽位齐全 → 查单据时**同时校验 `document_type + document_no`**：两者不一致 → 澄清（A=采用单据实际类型，B=重新输入编号），**不偷偷忽略 document_type**；一致 → 校验数据权限 → 创建/推进分析任务。
+4. 状态机：缺 `document_type` → 问类型；缺 `document_no` → 问编号；槽位存 `review_sessions`（对应 2.7.6）。
 
 ---
 

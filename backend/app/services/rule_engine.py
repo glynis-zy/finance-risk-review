@@ -6,6 +6,7 @@
 - 风险结论永远由本引擎决定，LLM 只做报告润色；
 - 整体风险 = 最高单项 + 数量升级（有 high→high；medium≥3→high；low≥5→medium）。
 """
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -14,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 from app.document_schemas import REQUIRED_ATTACHMENTS
 from app.models.analysis import RiskFinding
 from app.models.attachment import (
@@ -92,6 +95,14 @@ def build_context(db: Session, document: FinancialDocument) -> RuleContext:
     position_level = applicant.position_level if applicant else None
 
     configs = load_configs(db)
+    # P2-2：置信度阈值以 sys_params 为唯一权威来源（附件完整性规则）
+    from app.services.sysparam_service import get as _get_param
+    _conf = _get_param(db, "attachment.confidence_threshold")
+    if _conf is not None:
+        try:
+            configs.setdefault("attachment_completeness", {})["confidence_threshold"] = float(_conf)
+        except ValueError:
+            pass
     standards = list(db.scalars(select(ExpenseStandard)).all())
     price_refs = list(db.scalars(select(MarketPriceReference)).all())
     return RuleContext(
@@ -126,13 +137,18 @@ DEFAULT_CONFIGS: dict[str, dict] = {
     "price_reasonableness": {"deviation_pct": 20},
     "spend_anomaly": {"history_spike_ratio": 3.0},
     "supplier_risk": {},
-    "attachment_completeness": {"confidence_threshold": 0.8},
+    # confidence_threshold 由 sys_params（attachment.confidence_threshold）注入，见 build_context
+    "attachment_completeness": {},
     "duplicate_invoice": {},
 }
 
 
 def run_all(ctx: RuleContext) -> list[Finding]:
-    """按注册顺序跑全部启用的规则，返回风险项列表。"""
+    """按注册顺序跑全部启用的规则，返回风险项列表。
+
+    P0-4：规则异常禁止静默跳过——财务审核不能因规则代码异常而生成"看似正常的低风险报告"。
+    异常带 rule_code 向上抛，由 analysis 流水线将整个任务置 failed。
+    """
     findings: list[Finding] = []
     for code, check in REGISTRY:
         cfg = ctx.configs.get(code, {})
@@ -143,8 +159,9 @@ def run_all(ctx: RuleContext) -> list[Finding]:
             continue
         try:
             findings.extend(check(ctx, cfg))
-        except Exception:  # noqa: BLE001  单规则失败不影响整体
-            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("规则 %s 执行异常", code)
+            raise RuntimeError(f"规则 {code} 执行异常: {exc}") from exc
     return findings
 
 
@@ -283,6 +300,34 @@ def check_contract_payment(ctx: RuleContext, cfg: dict) -> list[Finding]:
                 threshold={"ratio_gap_pct": 5},
                 suggestion="核对付款条件是否达成",
             ))
+
+    # P1-7：合同主体（乙方）与供应商/收款方一致性
+    party_b = contract.get("party_b")
+    supplier_name = tf.get("supplier_name") or ctx.document.payee_name
+    if party_b and supplier_name:
+        if party_b not in supplier_name and supplier_name not in party_b:
+            findings.append(Finding(
+                risk_type="contract_payment_consistency", risk_level="medium",
+                risk_title="合同乙方与收款单位不一致",
+                description=f"合同乙方 {party_b} 与收款单位/供应商 {supplier_name} 不一致",
+                actual={"party_b": party_b},
+                reference={"supplier_name": supplier_name},
+                evidence={"contract_no": contract.get("contract_no")},
+                suggestion="核对交易主体是否一致，防止挂靠收款",
+            ))
+    # P1-7：付款条件表述一致性（有可确定字段时比较）
+    ctr_terms = (contract.get("payment_terms") or "").strip()
+    doc_terms = (tf.get("payment_terms") or "").strip()
+    if ctr_terms and doc_terms:
+        if ctr_terms not in doc_terms and doc_terms not in ctr_terms:
+            findings.append(Finding(
+                risk_type="contract_payment_consistency", risk_level="low",
+                risk_title="付款条件表述与合同不一致",
+                description=f"单据付款条件「{doc_terms}」与合同约定「{ctr_terms}」不一致",
+                actual={"document_terms": doc_terms},
+                reference={"contract_terms": ctr_terms},
+                suggestion="核对付款条件是否达成",
+            ))
     return findings
 
 
@@ -307,6 +352,22 @@ def check_batch_payment(ctx: RuleContext, cfg: dict) -> list[Finding]:
             threshold={"tolerance_pct": str(tol)},
             suggestion="核对各笔付款金额与批次总额",
         ))
+
+    # P1-7：付款笔数与批次声明一致性
+    declared = (ctx.document.type_fields_json or {}).get("payment_count")
+    if declared is not None:
+        try:
+            if int(declared) != len(pay_items):
+                findings.append(Finding(
+                    risk_type="batch_payment_consistency", risk_level="medium",
+                    risk_title="付款笔数与批次声明不符",
+                    description=f"声明 {int(declared)} 笔，实际付款明细 {len(pay_items)} 笔",
+                    actual={"declared_count": int(declared)},
+                    reference={"actual_count": len(pay_items)},
+                    suggestion="核对付款笔数是否完整",
+                ))
+        except (TypeError, ValueError):
+            pass
     # 重复收款账号
     seen = {}
     for i in pay_items:
@@ -382,6 +443,12 @@ def check_expense_policy(ctx: RuleContext, cfg: dict) -> list[Finding]:
         if cat is None:
             continue
         candidates = [s for s in ctx.standards if s.expense_category == cat]
+        # P1-7：选择消费日期当时有效的标准（effective_date <= expense_date）
+        if item.expense_date is not None:
+            valid = [s for s in candidates if s.effective_date <= item.expense_date]
+            if not valid:
+                continue  # 消费日期当时无有效标准 → 该规则不适用
+            candidates = valid
         s = _match_standard(candidates, dept, level, item.expense_location)
         if s is None:
             continue
@@ -505,6 +572,30 @@ def check_spend_anomaly(ctx: RuleContext, cfg: dict) -> list[Finding]:
             description=f"周末消费日期: {', '.join(weekend[:5])}",
             actual={"weekend_dates": weekend[:5]},
             suggestion="核对该消费是否与出差相关",
+        ))
+    # P1-7：异地异常——同一消费日出现多个不同地点
+    loc_by_date: dict = {}
+    for i in items:
+        if i.expense_date and i.expense_location:
+            loc_by_date.setdefault(i.expense_date, set()).add(i.expense_location)
+    multi_loc = [f"{d}（{'、'.join(sorted(locs))}）" for d, locs in sorted(loc_by_date.items()) if len(locs) > 1]
+    if multi_loc:
+        findings.append(Finding(
+            risk_type="spend_anomaly", risk_level="low",
+            risk_title="同日多地消费",
+            description=f"以下日期出现多个消费地点: {', '.join(multi_loc[:5])}",
+            actual={"dates": multi_loc[:5]},
+            suggestion="核对同日多地消费是否真实",
+        ))
+    # P1-7：拆单报销——申请人同一天提交多张单据（确定性判定，不做 ML）
+    same_day_others = [h for h in ctx.history if h.apply_date == ctx.document.apply_date]
+    if same_day_others:
+        findings.append(Finding(
+            risk_type="spend_anomaly", risk_level="low",
+            risk_title="同日多单据，疑似拆单",
+            description=f"申请人在 {ctx.document.apply_date} 提交了 {len(same_day_others) + 1} 张单据",
+            actual={"same_day_count": len(same_day_others) + 1},
+            suggestion="核对是否存在拆单规避审批/限额",
         ))
     # 历史金额突增
     if ctx.history:

@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentCreate(BaseModel):
@@ -14,7 +14,7 @@ class DocumentCreate(BaseModel):
     payee_name: str
     payee_account: str
     expense_category: str
-    total_amount: Decimal
+    total_amount: Decimal = Field(gt=0)   # P1-6：金额必须 > 0，防规则引擎除零
     currency: str = "CNY"
     apply_date: date
     reason_text: str = ""
@@ -40,9 +40,9 @@ class LineItemCreate(BaseModel):
     specification: str | None = None   # 规格：市场价规则维度
     expense_date: date | None = None
     expense_location: str | None = None
-    quantity: Decimal | None = None
-    unit_price: Decimal | None = None
-    amount: Decimal
+    quantity: Decimal | None = Field(default=None, gt=0)     # P1-6
+    unit_price: Decimal | None = Field(default=None, ge=0)   # P1-6
+    amount: Decimal = Field(gt=0)                            # P1-6
     remark: str | None = None
 
 
@@ -51,9 +51,9 @@ class LineItemUpdate(BaseModel):
     specification: str | None = None
     expense_date: date | None = None
     expense_location: str | None = None
-    quantity: Decimal | None = None
-    unit_price: Decimal | None = None
-    amount: Decimal | None = None
+    quantity: Decimal | None = Field(default=None, gt=0)
+    unit_price: Decimal | None = Field(default=None, ge=0)
+    amount: Decimal | None = Field(default=None, gt=0)
     remark: str | None = None
 
 

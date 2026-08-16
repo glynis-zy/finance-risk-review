@@ -107,6 +107,26 @@ check("登出后旧令牌被拒(401)",
       client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {t2}"}).status_code == 401)
 check("其他令牌不受影响", client.get("/api/v1/auth/me", headers=h).status_code == 200)
 
+# 16. L2 数据权限越权（P0-1）：张三不能读/导出/看到李四的
+t2st = client.get("/api/v1/analysis-tasks/2", headers=h).status_code
+check("张三不能读李四的分析任务状态", t2st == 403, f"-> {t2st}")
+rep2 = client.get("/api/v1/analysis-tasks/2/report", headers=hw).json()   # wangwu 可见 AP 报告
+exp2 = client.get(f"/api/v1/review-reports/{rep2['report_id']}/export", headers=h).status_code
+check("张三不能导出李四的报告", exp2 == 403, f"-> {exp2}")
+zhang_list = client.get("/api/v1/review-reports", headers=h).json()
+zhang_nos = [r["document_no"] for r in zhang_list]
+check("张三报告列表不含李四单据", "AP-20260816-002" not in zhang_nos, str(zhang_nos))
+
+# 审批人 sunqi（无分配任务）不能复核未分配给自己的报告；wangwu（有任务）可以
+sunqi = client.post("/api/v1/auth/login", json={"username": "sunqi", "password": "123456"}).json()
+hs = {"Authorization": f"Bearer {sunqi['access_token']}"}
+mr_deny = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
+                      headers=hs, json={"review_result": "approved", "review_comment": "x"}).status_code
+check("未分配任务的审批人不能复核报告", mr_deny == 403, f"-> {mr_deny}")
+mr_ok = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
+                    headers=hw, json={"review_result": "manual", "review_comment": "收到"}).status_code
+check("分配任务的审批人能复核报告", mr_ok == 200, f"-> {mr_ok}")
+
 # 15. 管理端（用户/角色/系统参数）
 admin = client.post("/api/v1/auth/login", json={"username": "admin", "password": "123456"}).json()
 ha = {"Authorization": f"Bearer {admin['access_token']}"}

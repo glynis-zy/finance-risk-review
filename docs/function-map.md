@@ -26,7 +26,7 @@
 | POST `/api/v1/documents/{id}/copy` | `copy_document()` | `document_service.copy()` | 复制为**新 draft**（新编号） | financial_documents |
 | POST `/api/v1/documents/{id}/submit` | `submit_document()` | `document_service.submit()` | 字段完整性校验 → **快照+新版本** → 建审批实例 → 建分析任务；draft=首次提交，returned=退回后重提交（同一接口，状态守卫放行两种状态） | document_versions/approval_instances/analysis_tasks/status_logs |
 | POST `/api/v1/documents/{id}/withdraw` | `withdraw_document()` | `document_service.withdraw()` | **仅 pending_review（L3）**；实例→cancelled，pending 任务→cancelled | document_status_logs/approval_instances/approval_tasks |
-| POST `/api/v1/documents/{id}/void` | `void_document()` | `document_service.void()` | 仅 draft/pending_review 可作废；终态 | document_status_logs |
+| POST `/api/v1/documents/{id}/void` | `void_document()` | `document_service.void()` | 仅 draft/pending_review 可作废；作废审批中单据会**取消审批实例/待处理任务/未开始分析**（P0-2 终态） | document_status_logs/approval_instances/approval_tasks/analysis_tasks |
 | POST `/api/v1/documents/{id}/line-items` | `add_line_item()` | `document_service.add_line_item()` | 按 item_type 校验 → 重算合计 | document_line_items |
 | PATCH `/api/v1/documents/{id}/line-items/{lid}` | `update_line_item()` | `document_service.update_line_item()` | 同上 | document_line_items |
 | DELETE `/api/v1/documents/{id}/line-items/{lid}` | `delete_line_item()` | `document_service.delete_line_item()` | 同上 | document_line_items |
@@ -51,7 +51,7 @@
 | 接口 | 处理函数 | 调用 service | 职责 | 涉及表 |
 |---|---|---|---|---|
 | POST `/api/v1/documents/{id}/analysis` | `create_analysis_task()` | `analysis_service.enqueue()` | 建分析任务（可来自对话或审批页"发起分析"） | analysis_tasks |
-| GET `/api/v1/analysis-tasks/{tid}` | `get_task_status()` | `analysis_service.get_status()` | **轮询用**：状态 + 当前步骤 + 进度 | analysis_tasks |
+| GET `/api/v1/analysis-tasks/{tid}` | `get_task_status()` | `analysis_service.get_status()` | **轮询用**：状态 + 当前步骤；**L2：task 对应 document 必须可见（P0-1）** | analysis_tasks |
 | GET `/api/v1/analysis-tasks/{tid}/findings` | `get_findings()` | `analysis_service.get_findings()` | 风险项列表 | risk_findings |
 | GET `/api/v1/analysis-tasks/{tid}/report` | `get_report()` | `analysis_service.get_report()` | 风险报告 + 面板数据 | review_reports/risk_findings |
 
@@ -70,7 +70,7 @@
 | GET/POST `/api/v1/rules`，PATCH `/{id}` | `list/create/update_rule()` | `rule_engine.*_rule()` | 规则配置 CRUD（财务） | **risk_rules** |
 | GET `/api/v1/suppliers/{code}/risks` | `get_supplier_risks()` | `supplier_service.get_risks()` | 供应商档案+标签+黑名单+异常 | supplier_profiles |
 | PATCH `/api/v1/risk-findings/{fid}/review-status` | `update_finding_status()` | `analysis_service.update_finding_status()` | 人工确认/排除风险项 | risk_findings |
-| POST `/api/v1/review-reports/{rid}/manual-reviews` | `submit_manual_review()` | `report_service.submit_manual_review()` | 复核意见+结论 | manual_reviews |
+| POST `/api/v1/review-reports/{rid}/manual-reviews` | `submit_manual_review()` | `report_service.submit_manual_review()` | **admin 可操作；approver 仅限自己审批任务范围内的单据报告（P0-1）** | manual_reviews |
 | GET `/api/v1/review-reports/{rid}/export` | `export_report()` | `report_service.export_html()` | markdown → **HTML** 导出 | review_reports |
 | GET `/api/v1/audit-logs` | `list_audit_logs()` | `audit_service.list()` | 操作日志查询（审核记录页） | audit_logs |
 | GET/POST `/api/v1/admin/users`，PATCH `/{id}` | `list/create/update_user()` | 用户 CRUD + 角色分配（`user:manage`） | users/user_roles |
@@ -142,8 +142,10 @@ queued → querying_document → loading_attachments → parsing_attachments
 | duplicate_invoice | `check_duplicate_invoice()` | 发票四要素 + 文件 hash 全库查重 |
 
 ### 2.8 dialogue_service（对话）
-`create_session / process_message / list_messages / _nlu(session, text) / _next_question(session) / _start_analysis(session)`
-状态机槽位：`document_type / document_no`（存 review_sessions）；输入优先级：LLM NLU 成功→用；失败→规则匹配纯槽位问答。
+`create_session / process_message / list_messages / _advance(session, content) / _parse_slots(text) / _local_parse(text) / _start_analysis(session)`
+槽位解析（P1-1）：LLM NLU 优先 → 失败走 `_local_parse`（五类中文名/简称 + CP/AP/BP/EX/TR-编号正则）→ 槽位状态机。
+冲突处理：type+no 不一致 → 澄清 A（采用单据实际类型）/B（重新输入编号）；查询同时校验二者；显式纠正覆盖旧槽位；无 key 纯槽位可跑通。
+状态机槽位：`document_type / document_no`（存 review_sessions）。
 
 ### 2.9 auth_service / perms（权限）
 `authenticate / get_current_user`；撤销在 `core/security`：`revoke_token(db, token)`（写 `revoked_tokens`）、`is_token_revoked(db, jti)`（缓存→DB）、`purge_revoked(db)`（清过期）

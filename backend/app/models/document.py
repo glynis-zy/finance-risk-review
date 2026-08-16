@@ -41,7 +41,8 @@ class FinancialDocument(TimestampMixin, Base):
     apply_date: Mapped[date] = mapped_column(Date)
     reason_text: Mapped[str] = mapped_column(Text, default="")
     document_status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    current_version: Mapped[int] = mapped_column(Integer, default=1)
+    # 最近一次正式提交的版本号；draft 未提交过为 0，首次提交=1，重提交=上一版+1
+    current_version: Mapped[int] = mapped_column(Integer, default=0)
     type_fields_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 

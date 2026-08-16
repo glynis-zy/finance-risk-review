@@ -43,3 +43,13 @@ def visible_document_ids(db: Session, user: User) -> list[int] | None:
         return list(set(own) | set(task_docs))
 
     return list(own)
+
+
+def approval_document_ids(db: Session, user_id: int) -> set[int]:
+    """用户作为审批人处理过的单据 id（人工复核/审批范围的精确判定）。"""
+    rows = db.execute(
+        select(ApprovalInstance.document_id)
+        .join(ApprovalTask, ApprovalTask.instance_id == ApprovalInstance.id)
+        .where(ApprovalTask.approver_id == user_id)
+    ).scalars().all()
+    return set(rows)

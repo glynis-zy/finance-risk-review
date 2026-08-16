@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -122,6 +123,10 @@ async def parse_attachment(db: Session, attachment: DocumentAttachment) -> dict:
     from app.services import sysparam_service
     attachment.parse_status = "parsing"
     db.flush()
+    # 幂等（P1-4）：重新解析前清掉该附件旧记录，避免金额翻倍 / 历史 parse 干扰
+    db.execute(delete(InvoiceRecord).where(InvoiceRecord.attachment_id == attachment.id))
+    db.execute(delete(AttachmentParseResult).where(AttachmentParseResult.attachment_id == attachment.id))
+    db.flush()
     mode = sysparam_service.get(db, "ocr.mode", "auto")
     preset = _full_preset_for(attachment.file_name)
 
@@ -171,7 +176,10 @@ async def _parse_real_invoice(db, attachment, file_bytes, path, is_pdf) -> dict:
     if text:
         fields = _parse_invoice_from_text(text)
     if fields is None:
-        # 文本无效 / 扫描 PDF / 图片 → 逐页 OCR 发票，取第一个识别出关键字段的结果
+        # 文本 PDF 正则失败 → 仍渲染页面走专用发票 OCR（P1-5）
+        if not images and is_pdf:
+            images = _pdf_to_images(path)
+        # 扫描 PDF / 图片 / 渲染页 → 逐页 OCR 发票，取第一个识别出关键字段的结果
         for page_bytes in images:
             data = await ocr_client.ocr_invoice(page_bytes)
             cand = _norm_invoice(data)
@@ -208,7 +216,8 @@ async def _parse_real_contract(db, attachment, file_bytes, path, is_pdf) -> dict
         if not full_text:
             raise ocr_client.ParseFailure("合同 OCR 未提取到文本")
 
-    confidence = min(confidences) if confidences else (0.98 if text else None)
+    # P2-4：无可靠置信度时如实为 None（文本直取/真实 OCR 均不伪造）
+    confidence = min(confidences) if confidences else None
     cf = llm_client.extract_contract_fields(full_text)
     if cf is None:
         raise ocr_client.ParseFailure("合同字段提取失败")
@@ -237,7 +246,8 @@ async def _parse_real_generic(db, attachment, file_bytes, path, is_pdf, category
         if not full_text:
             raise ocr_client.ParseFailure("未提取到文本")
 
-    confidence = min(confidences) if confidences else (0.98 if text else None)
+    # P2-4：无可靠置信度时如实为 None
+    confidence = min(confidences) if confidences else None
     _write_parse(db, attachment, category, full_text, None, positions, confidence)
     _succeed(db, attachment)
     return {"ok": True, "category": category}

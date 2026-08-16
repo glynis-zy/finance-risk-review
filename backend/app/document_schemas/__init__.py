@@ -26,6 +26,7 @@ TYPE_FIELD_SCHEMAS: dict[str, list[dict]] = {
     ],
     "batch_payment": [  # 批量付款单：收款对象/单笔金额由明细承载
         {"key": "batch_note", "label": "批次说明", "type": "string", "required": False},
+        {"key": "payment_count", "label": "付款笔数", "type": "number", "required": True},
     ],
     "expense": [  # 费用报销单：明细承载费用明细
         {},
@@ -86,6 +87,17 @@ def validate_type_fields(document_type: str, values: dict) -> tuple[dict, list[s
                 cleaned[key] = _to_date(raw, label, errors)
         except Exception:
             errors.append(f"{label} 格式不正确")
+
+    # P1-6：百分数必须在 0~100
+    for field in get_schema(document_type):
+        if field["type"] == "percent" and field["key"] in cleaned:
+            if cleaned[field["key"]] > 100:
+                errors.append(f"{field['label']} 应在 0~100")
+    # P1-6：差旅开始日期不得晚于结束日期
+    if document_type == "travel" and isinstance(cleaned.get("travel_start"), date) \
+            and isinstance(cleaned.get("travel_end"), date):
+        if cleaned["travel_start"] > cleaned["travel_end"]:
+            errors.append("出差开始日期不能晚于结束日期")
     return cleaned, errors
 
 

@@ -110,14 +110,17 @@ def generate(db: Session, task, doc, findings: list, overall: str) -> ReviewRepo
 
     markdown = "\n".join(lines)
 
-    # LLM 润色"整体风险"叙述（只换表达；失败用模板文本，不影响结论）
+    # P1-8：LLM 只润色、不污染确定结论——整体风险等级/统计/建议由规则引擎权威给出，
+    # LLM 叙述作为独立的 "### AI 风险说明" 小节插入（即使 LLM 写错，固定结论仍是权威值）。
     try:
         narrative = llm_client.polish_risk_report(
             f"{TYPE_LABELS.get(doc.document_type)} {doc.document_no}，金额 {doc.total_amount}",
             [{"level": f.risk_level, "title": f.risk_title, "desc": f.description} for f in findings],
         )
-        if narrative and narrative != markdown:
-            markdown = markdown.replace("## 二、整体风险", f"## 二、整体风险\n\n{narrative}\n", 1)
+        if narrative:
+            marker = "## 三、金额核对"
+            markdown = markdown.replace(
+                marker, f"### AI 风险说明\n\n{narrative}\n\n{marker}", 1)
     except Exception:  # noqa: BLE001
         pass
 

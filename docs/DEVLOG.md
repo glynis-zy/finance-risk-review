@@ -172,7 +172,51 @@
 3. **DESIGN.md 收敛模式标签**：保留 6 个明确模式（策略/适配器/单例/责任链/装饰器-DI/工厂）；run_pipeline、前端轮询、router→service、SQL 封装移入"有味道不强贴 GoF"清单；附面试建议"少贴标签、多讲职责"。
 - 回归：pytest 27/27、冒烟 29/29、compile 通过。
 
-### 下一步（由你决定）
+### 16:00 - 第二轮审查修复：P0（权限 / 状态机 / 版本 / 规则异常）
+**P0-1 分析/报告 L2 数据权限闭环**
+- `analysis_service.get_status()` 增加 `_visible_task`（task 对应 document 必须可见）；
+- `reports.py` 重写：list 按 `visible_document_ids` 过滤、export 校验可见、manual-reviews 限 admin + 自己审批任务范围（新 `scopes.approval_document_ids`）；
+- `riskfindings.py` 校验 finding 所属 document 可见。
+- 冒烟新增 5 项越权断言（张三读李四任务/导出李四报告/列表不见李四、未分配任务的 sunqi 复核被拒、wangwu 复核通过）。
+
+**P0-2 voided 终态**
+- `document_service.void()`：作废审批中单据 → 取消 running 实例 + pending 任务 + 未开始分析任务；
+- `workflow_service` 新增 `_ensure_processable`（instance 必须 running + document 必须 pending_review/reviewing），approve/return/reject 统一执行；
+- 回归测试：提交→作废→旧 task approve → 409，单据仍 voided。
+
+**P0-3 版本语义**
+- `current_version` 默认 0（=最近一次正式提交版本）；提交时 `new_version = current_version + 1`；
+- `_snapshot(doc, user, version_no)` 不再自行递增；`document_version` 附件模型默认 0（暂存），提交时绑定到本次版本；
+- 首次提交三者（snapshot/current_version/instance.document_version）=1，重提交=2，附件可追溯进入版本；
+- 修复模型 `DocumentAttachment.document_version` 默认 1→0 的 off-by-one。
+
+**P0-4 规则异常不静默跳过**
+- `rule_engine.run_all` 删除 `except: continue`，异常带 rule_code 抛 RuntimeError；
+- 流水线 catch → `analysis_task = failed`、`current_step` 保留 analyzing、`error_message` 指明规则、不生成报告；
+- 测试：注入会抛异常的规则 → task failed、无 succeeded 报告。
+
+### 16:30 - 第二轮审查修复：P1
+**P1-1 对话 fallback + 冲突澄清**：本地规则槽位解析（五类中文名/简称 + CP/AP/BP/EX/TR-编号正则）；查询同时校验 type+no；冲突 → 澄清 A（采用单据实际类型）/B（重新输入）；无 key 纯槽位可跑通；已确认槽位不重复询问、显式纠正覆盖。测试 3 条。
+**P1-2 提交前附件类别校验**：`DocumentAttachment.document_category`（上传时按文件名识别）；提交按 REQUIRED_ATTACHMENTS 类别校验（两张 invoice 不能冒充 contract+invoice）。测试 1 条。
+**P1-3 审批意见 + 状态日志**：approve/return/reject 带 `review_comment` 落库；`_status_log` 记录 pending_review→reviewing / →approved/returned/rejected，operator_id 记真实审批人（`_mark_processing(db, doc, operator_id)`）。
+**P1-4 附件解析幂等**：重解析前删旧 InvoiceRecord/ParseResult；同发票两次解析金额不翻倍。测试 1 条。
+**P1-5 文本 PDF 发票正则失败→渲染 OCR**：`_parse_real_invoice` 文本 PDF 正则失败仍 `_pdf_to_images` 走专用发票 OCR。
+**P1-6 输入边界**：`total_amount>0`、`amount>0`、`quantity>0`、`unit_price>=0`（Pydantic Field）；payment_ratio 0~100、差旅开始≤结束（schema 校验）。测试 4 条。
+**P1-7 规则分支补齐**：contract 加"乙方 vs 收款单位"、"付款条件表述"；batch 加 payment_count 声明对比（schema 新增 payment_count 必填）；expense 标准按 effective_date 选消费当日有效；spend 加"同日多地""同日多单据疑似拆单"。
+**P1-8 LLM 只润色**：报告固定结构化结论权威；LLM 叙述作为独立"### AI 风险说明"小节插入，不覆盖 overall/recommendation。
+
+### 16:50 - 第二轮审查修复：P2
+- 附件大小上限读 `sys_params.attachment.max_size_mb`（不再硬编码 10MB）；
+- 置信度阈值唯一权威源 = `sys_params.attachment.confidence_threshold`（规则 build_context 注入）；
+- `ContractFields.party_a/party_b` 改 Optional（与 Prompt"无法确定可为 null"对齐）；
+- OCR/文本提取无可靠置信度时如实 None（不再伪造 0.95/0.98）；
+- 百度 access token 失效（401/110/111）自动清空重取一次；
+- 新增第二个审批人 sunqi（无分配任务，越权测试用）。
+
+### 待办
+- [ ] MySQL 实跑一次（本机 MySQL 8.0 服务 / Docker）
+- [ ] git init + 首次提交
+- [ ] 文档同步（architecture/function-map/DESIGN）
 - [ ] 启动 Docker Desktop → 跑 MySQL 生产路径
 - [ ] 配置 DeepSeek + 百度云 key → 演示真 OCR/LLM 路径
 - [ ] 替换占位 PNG 为真实发票/合同样例图

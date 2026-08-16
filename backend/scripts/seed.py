@@ -44,6 +44,7 @@ from app.models.workflow import (  # noqa: E402
     ApprovalInstance, ApprovalTask, ApprovalWorkflow, ApprovalWorkflowNode,
 )
 from app.services import document_service, analysis_service  # noqa: E402
+from app.services.parse_pipeline import recognize_document_type  # noqa: E402
 
 PRESET_DIR = Path(settings.preset_parse_dir)
 UPLOAD_DIR = Path(settings.file_storage_path)
@@ -115,6 +116,7 @@ USERS = [
     ("zhangsan", "张三", "applicant", "manager"),
     ("lisi", "李四", "applicant", "staff"),
     ("wangwu", "王五", "approver", "manager"),
+    ("sunqi", "孙七", "approver", "staff"),   # 第二个审批人（无分配任务，用于越权测试）
     ("zhaoliu", "赵六", "finance", "staff"),
     ("admin", "管理员", "admin", "manager"),
 ]
@@ -128,7 +130,7 @@ RULE_CONFIGS = {
     "price_reasonableness": {"deviation_pct": 20},
     "spend_anomaly": {"history_spike_ratio": 3.0},
     "supplier_risk": {},
-    "attachment_completeness": {"confidence_threshold": 0.8},
+    "attachment_completeness": {},  # 置信度阈值权威来源为 sys_params.attachment.confidence_threshold
     "duplicate_invoice": {},
 }
 
@@ -257,7 +259,8 @@ def _attach(db, doc, file_name: str, preset: dict) -> None:
     png_bytes = make_png(int(uuid.uuid4().hex[:8], 16))
     abs_p.write_bytes(png_bytes)
     att = DocumentAttachment(
-        document_id=doc.id, document_version=doc.current_version,
+        document_id=doc.id, document_version=0,  # 暂存，提交时绑定版本
+        document_category=recognize_document_type(file_name),  # 类别：提交时按类别校验（P1-2）
         file_name=file_name, file_type="png", file_size=len(png_bytes),
         file_path=str(rel).replace("\\", "/"),
         file_hash=hashlib.sha256(png_bytes).hexdigest(),
@@ -333,7 +336,7 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
         applicant_id=users["zhangsan"].id, applicant_department="行政部", budget_department="行政部",
         payee_name="多供应商", payee_account="batch", expense_category="采购",
         total_amount=Decimal("30000"), currency="CNY", apply_date=today, reason_text="8月批量采购付款",
-        type_fields_json={"batch_note": "多供应商批量付款"},
+        type_fields_json={"batch_note": "多供应商批量付款", "payment_count": 3},
     )
     db.add(d3); db.flush()
     for i, (name, acct, amt) in enumerate([
@@ -417,9 +420,9 @@ def submit_all(db, docs) -> None:
     for doc, user in docs:
         document_service.submit(db, user, doc.id)
         print(f"[seed] 已提交 {doc.document_no} -> {doc.document_status}")
-    # 等待后台分析全部进入终态（succeeded/failed/cancelled），最多 60s
+    # 等待后台分析全部进入终态（succeeded/failed/cancelled），最多 120s（MySQL 首次较慢）
     terminal = {"succeeded", "failed", "cancelled"}
-    deadline = time.time() + 60
+    deadline = time.time() + 120
     while time.time() < deadline:
         pending = db.scalars(select(AnalysisTask).where(
             AnalysisTask.task_status.notin_(terminal))).all()

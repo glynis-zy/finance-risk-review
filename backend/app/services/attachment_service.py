@@ -18,9 +18,10 @@ from app.models.attachment import DocumentAttachment
 from app.models.document import FinancialDocument
 from app.models.user import User
 from app.services import audit_service, document_service
+from app.services.parse_pipeline import recognize_document_type
 
 ALLOWED_TYPES = {"pdf", "png", "jpg", "jpeg"}
-MAX_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_SIZE_DEFAULT_MB = 10  # 兜底；权威值在 sys_params.attachment.max_size_mb（P2-1）
 
 
 def _sha256(data: bytes) -> str:
@@ -33,9 +34,11 @@ async def upload(db: Session, user: User, doc_id: int, file: UploadFile) -> Docu
     ext = (file.filename or "").rsplit(".", 1)[-1].lower() if file.filename else ""
     if ext not in ALLOWED_TYPES:
         raise HTTPException(400, f"仅支持 {sorted(ALLOWED_TYPES)} 格式")
+    from app.services import sysparam_service
+    max_mb = sysparam_service.get_int(db, "attachment.max_size_mb", MAX_SIZE_DEFAULT_MB)
     data = await file.read()
-    if len(data) > MAX_SIZE:
-        raise HTTPException(400, "文件超过 10MB 上限")
+    if len(data) > max_mb * 1024 * 1024:
+        raise HTTPException(400, f"文件超过 {max_mb}MB 上限")
     if not data:
         raise HTTPException(400, "空文件")
 
@@ -49,7 +52,8 @@ async def upload(db: Session, user: User, doc_id: int, file: UploadFile) -> Docu
 
     att = DocumentAttachment(
         document_id=doc_id,
-        document_version=0,  # 上传后提交时取当前版本
+        document_version=0,  # 暂存附件，提交时绑定版本
+        document_category=recognize_document_type(file.filename or ""),  # 按文件名识别类别（P1-2）
         file_name=file.filename or f"{file_id}.{ext}",
         file_type=ext,
         file_size=len(data),

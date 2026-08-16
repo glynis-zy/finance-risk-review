@@ -11,10 +11,10 @@ from pydantic import BaseModel
 
 
 class ContractFields(BaseModel):
-    """合同关键字段（OCR 全文 → LLM 提取）。"""
+    """合同关键字段（OCR 全文 → LLM 提取）。P2-3：无法确定时允许 null，与 Prompt 对齐。"""
     contract_no: str
-    party_a: str                      # 甲方（买方）
-    party_b: str                      # 乙方（卖方/供应商）
+    party_a: str | None = None        # 甲方（买方）
+    party_b: str | None = None        # 乙方（卖方/供应商）
     contract_amount: Decimal | None = None
     payment_terms: str | None = None   # 付款条件描述
     payment_ratio: Decimal | None = None  # 付款比例 %
