@@ -1,0 +1,100 @@
+# -*- coding: utf-8 -*-
+"""单据相关 Pydantic 模型。"""
+from datetime import date
+from decimal import Decimal
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+
+class DocumentCreate(BaseModel):
+    document_type: str
+    applicant_department: str
+    budget_department: str
+    payee_name: str
+    payee_account: str
+    expense_category: str
+    total_amount: Decimal
+    currency: str = "CNY"
+    apply_date: date
+    reason_text: str = ""
+    type_fields: dict[str, Any] = {}
+
+
+class DocumentUpdate(BaseModel):
+    applicant_department: str | None = None
+    budget_department: str | None = None
+    payee_name: str | None = None
+    payee_account: str | None = None
+    expense_category: str | None = None
+    total_amount: Decimal | None = None
+    currency: str | None = None
+    apply_date: date | None = None
+    reason_text: str | None = None
+    type_fields: dict[str, Any] | None = None
+
+
+class LineItemCreate(BaseModel):
+    item_type: str = "expense"     # expense / payment / transport / hotel / meal
+    item_name: str
+    expense_date: date | None = None
+    expense_location: str | None = None
+    quantity: Decimal | None = None
+    unit_price: Decimal | None = None
+    amount: Decimal
+    remark: str | None = None
+
+
+class LineItemUpdate(BaseModel):
+    item_name: str | None = None
+    expense_date: date | None = None
+    expense_location: str | None = None
+    quantity: Decimal | None = None
+    unit_price: Decimal | None = None
+    amount: Decimal | None = None
+    remark: str | None = None
+
+
+class LineItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    item_type: str
+    item_name: str
+    expense_date: date | None
+    expense_location: str | None
+    quantity: Decimal | None
+    unit_price: Decimal | None
+    amount: Decimal
+    remark: str | None
+
+
+class DocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_type: str
+    document_no: str
+    applicant_id: int
+    applicant_department: str
+    budget_department: str
+    payee_name: str
+    payee_account: str
+    expense_category: str
+    total_amount: Decimal
+    currency: str
+    apply_date: date
+    reason_text: str
+    document_status: str
+    current_version: int
+    type_fields: dict[str, Any] = {}
+
+
+class AmountComparisonOut(BaseModel):
+    """金额核对面板数据（规格 2.7.13 金额核对）。"""
+    document_total: Decimal
+    line_items_total: Decimal
+    invoice_total: Decimal
+    contract_amount: Decimal | None
+    payment_amount: Decimal
+    differences: dict[str, Decimal | None] = {}

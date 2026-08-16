@@ -1,0 +1,13 @@
+{
+  "category": "contract",
+  "fields": {
+    "contract_no": "C2026-002",
+    "party_a": "某某公司",
+    "party_b": "远东贸易有限公司",
+    "contract_amount": 100000,
+    "payment_terms": "预付80%，货到付清",
+    "payment_ratio": 80,
+    "signed_date": "2026-08-02"
+  },
+  "confidence": 0.96
+}

@@ -1,0 +1,32 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 密钥与环境配置（.env.example 保留跟踪）----
+.env
+backend/.env
+!.env.example
+!backend/.env.example
+
+# ---- 运行期数据（seed 生成，不入库）----
+backend/data/
+backend/smoke.db
+*.db
+*.sqlite3
+
+# ---- 日志 ----
+*.log
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

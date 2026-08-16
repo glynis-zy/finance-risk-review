@@ -1,0 +1,8 @@
+{
+  "category": "payment_doc",
+  "fields": {
+    "batch_total": 30000,
+    "count": 3
+  },
+  "confidence": 0.98
+}

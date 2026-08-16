@@ -1,0 +1,14 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+pymysql>=1.1
+pydantic>=2.6
+pydantic-settings>=2.2
+python-multipart>=0.0.9
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1          # passlib 1.7.4 与 bcrypt>=4.1 不兼容，固定版本
+PyJWT>=2.8
+openai>=1.30          # DeepSeek 为 OpenAI 兼容接口
+httpx>=0.27           # 百度云 OCR REST 调用
+python-dotenv>=1.0
+pypdf>=4.2            # 文本型 PDF 直接抽文本（免 OCR）

@@ -1,0 +1,14 @@
+{
+  "category": "invoice",
+  "fields": {
+    "invoice_code": "202608100123",
+    "invoice_no": "88880001",
+    "seller_name": "恒通科技有限公司",
+    "buyer_name": "某某公司",
+    "invoice_date": "2026-08-10",
+    "amount_including_tax": 50000,
+    "tax_amount": 5747.13,
+    "amount_excluding_tax": 44252.87
+  },
+  "confidence": 0.99
+}
