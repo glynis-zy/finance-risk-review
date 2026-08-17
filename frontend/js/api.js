@@ -65,6 +65,19 @@ const API = {
   delLineItem: (id, lid) => API.request('DELETE', `/documents/${id}/line-items/${lid}`),
   amountCompare: (id) => API.request('GET', `/documents/${id}/amount-comparison`),
   createAnalysis: (id) => API.request('POST', `/documents/${id}/analysis`),
+  docAnalysisLatest: (id) => API.request('GET', `/documents/${id}/analysis/latest`),
+
+  // P0-3：带 Authorization 下载（<a href> 直链不会带 JWT Header）
+  async download(path, filename) {
+    const res = await fetch('/api/v1' + path, { headers: { 'Authorization': 'Bearer ' + this.token } });
+    if (!res.ok) throw new Error('下载失败');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename || 'download';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
 
   // ---- 附件 ----
   uploadAtt: (id, file) => API.upload(`/documents/${id}/attachments`, file),
@@ -85,9 +98,9 @@ const API = {
 
   // ---- 审批 ----
   myTasks: () => API.request('GET', '/approval-tasks'),
-  approveTask: (id) => API.request('POST', `/approval-tasks/${id}/approve`),
-  returnTask: (id) => API.request('POST', `/approval-tasks/${id}/return`),
-  rejectTask: (id) => API.request('POST', `/approval-tasks/${id}/reject`),
+  approveTask: (id, comment) => API.request('POST', `/approval-tasks/${id}/approve`, { review_comment: comment || '' }),
+  returnTask: (id, comment) => API.request('POST', `/approval-tasks/${id}/return`, { review_comment: comment || '' }),
+  rejectTask: (id, comment) => API.request('POST', `/approval-tasks/${id}/reject`, { review_comment: comment || '' }),
 
   // ---- 配置 ----
   listRules: () => API.request('GET', '/rules'),

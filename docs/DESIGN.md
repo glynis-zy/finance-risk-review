@@ -10,17 +10,17 @@
 ### 1.1 单一职责（SRP）
 - **路由层**（`routers/*.py`）只做三件事：收 HTTP 参数、调 service、回响应。
 - **服务层**（`services/*.py`）一个 service 一个领域，互不掺和：
-  `auth_service`（认证）/ `document_service`（单据+状态机）/ `workflow_service`（审批）/ `rule_engine`（判定）/ `analysis_service`（调度）/ `report_service`（报告）/ `audit_service`（审计）/ `attachment_service`（文件）/ `dialogue_service`（对话）/ `parse_pipeline`（解析）/ `sysparam_service`（系统参数）。
+  `auth_service`（认证）/ `document_service`（单据）/ `workflow_service`（审批）/ `analysis_service`（调度）/ `report_service`（报告）/ `audit_service`（审计）/ `attachment_service`（文件）/ `dialogue_service`（对话）/ `parse_pipeline`（解析）/ `sysparam_service`（系统参数）；判定逻辑在 `domain/risk_engine`。
 
 ### 1.2 开闭原则（OCP）——三处"加配置不改代码"
 | 扩展点 | 机制 | 新增成本 |
 |---|---|---|
 | 单据类型 | `document_schemas/` 元数据（字段定义+校验） | 加一份配置，平台零改动 |
-| 风险规则 | `rule_engine.REGISTRY` 注册表 | 注册一个 `check_xxx(ctx)` 确定性函数 |
-| 外部厂商 | `llm_client`/`ocr_client` 适配层 + `.env` | 只改环境变量 |
+| 风险规则 | `domain/risk_engine.REGISTRY` 注册表 | 注册一个 `check_xxx(ctx)` 确定性函数 |
+| 外部厂商 | `clients/llm` / `clients/ocr` 适配层 + `.env` | 只改环境变量 |
 
 ### 1.3 依赖倒置（DIP）
-业务代码依赖 `llm_client.extract_contract_fields()` / `ocr_client.ocr_invoice()` 这样的**抽象接口**，不依赖具体厂商 SDK。换 DeepSeek→通义 / 百度云→阿里云，只动适配层实现与配置。
+业务代码依赖 `clients.llm.extract_contract_fields()` / `clients.ocr.ocr_invoice()` 这样的**统一出口**，不依赖具体厂商 SDK。换 DeepSeek→通义 / 百度云→阿里云，只动 `clients/` 适配层实现与 `.env`。
 
 ### 1.4 接口隔离 / DTO 边界
 Pydantic `schemas/*.py` 是内外边界：LLM 输出必须过 `ContractFields`/`SlotUpdate` 校验（**禁止自由文本字段**）；HTTP 入参出参走 DTO，ORM 对象不直接暴露。
@@ -49,9 +49,9 @@ RBAC（能不能做）→ 数据权限（能看哪些行）→ 状态权限（�
 
 | 模式 | 代码位置 | 一句话 |
 |---|---|---|
-| **策略模式** | `rule_engine.REGISTRY` + `run_all()` | 风险规则是策略注册表，新增规则=注册一个函数，启停/阈值由 `risk_rules` 配置驱动，调用方零改动 |
-| **适配器模式** | `services/llm_client.py`、`services/ocr_client.py` | 外部厂商封装成统一接口，换厂商只改适配器和 `.env` |
-| **单例（懒加载）** | `llm_client._get_client()`、`analysis_service._get_loop()` | 客户端/后台事件循环全局一份，首次调用才初始化 |
+| **策略模式** | `domain/risk_engine.REGISTRY` + `run_all()` | 风险规则是策略注册表，新增规则=注册一个函数，启停/阈值由 `risk_rules` 配置驱动，调用方零改动 |
+| **适配器模式** | `clients/llm/deepseek.py`、`clients/ocr/baidu.py` | 外部厂商封装成统一接口，换厂商只改适配器和 `.env` |
+| **单例（懒加载）** | `clients.llm.deepseek._get_client()`、`analysis_service._get_loop()` | 客户端/后台事件循环全局一份，首次调用才初始化 |
 | **责任链** | `perms`(L1) → `scopes`(L2) → 状态守卫(L3) | 权限三级校验依次执行，任一关不过即 4xx |
 | **装饰器/DI** | `require_perm()` 依赖工厂 + FastAPI `Depends` | 权限作为依赖注入到路由签名，接口声明即权限声明 |
 | **工厂/注册表** | `parse_pipeline.recognize_document_type` + `build_context` | 按文档类别路由解析路径；聚合构造规则上下文 |

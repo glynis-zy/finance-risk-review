@@ -21,7 +21,8 @@ from app.models.attachment import (
     DocumentAttachment,
     InvoiceRecord,
 )
-from app.services import llm_client, ocr_client
+from app.clients import llm as llm_client
+from app.clients import ocr as ocr_client
 
 logger = logging.getLogger(__name__)
 

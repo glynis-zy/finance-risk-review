@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """规则配置路由：risk_rules CRUD（财务人员维护）。"""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ class RuleIn(BaseModel):
     rule_name: str
     applies_to: dict | None = None      # {document_types: [...]}
     enabled: bool = True
-    config: dict = {}
+    config: dict = Field(default_factory=dict)
 
 
 @router.get("")

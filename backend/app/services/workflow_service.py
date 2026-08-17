@@ -7,14 +7,13 @@
 - return/reject：单据 returned/rejected，实例终态，未处理任务 cancelled
 """
 from datetime import datetime
-from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.scopes import get_role_codes
 from app.document_schemas import TYPE_LABELS
+from app.domain import document_state
 from app.models.document import FinancialDocument
 from app.models.user import User
 from app.models.workflow import (
@@ -23,6 +22,7 @@ from app.models.workflow import (
     ApprovalWorkflow,
     ApprovalWorkflowNode,
 )
+from app.repositories.workflow_repo import WorkflowRepository
 from app.services import audit_service
 
 PENDING, APPROVED, RETURNED, REJECTED = "pending", "approved", "returned", "rejected"
@@ -30,14 +30,8 @@ PENDING, APPROVED, RETURNED, REJECTED = "pending", "approved", "returned", "reje
 
 def _pick_user_with_role(db: Session, role_code: str) -> User | None:
     """找一个持有指定角色的启用用户，作为任务办理人。"""
-    from app.models.user import Role, UserRole
-    return db.scalars(
-        select(User)
-        .join(UserRole, UserRole.user_id == User.id)
-        .join(Role, Role.id == UserRole.role_id)
-        .where(Role.role_code == role_code, User.status == "active")
-        .limit(1)
-    ).first()
+    from app.repositories.user_repo import UserRepository
+    return UserRepository(db).active_user_with_role(role_code)
 
 
 def start_approval(db: Session, document: FinancialDocument) -> ApprovalInstance:
@@ -67,16 +61,12 @@ def start_approval(db: Session, document: FinancialDocument) -> ApprovalInstance
 
 def list_my_tasks(db: Session, user: User) -> list[ApprovalTask]:
     """L2：只返回分配给当前用户的待办任务。"""
-    return list(db.scalars(
-        select(ApprovalTask)
-        .where(ApprovalTask.approver_id == user.id, ApprovalTask.task_status == PENDING)
-        .order_by(ApprovalTask.id.asc())
-    ).all())
+    return WorkflowRepository(db).my_pending_tasks(user.id)
 
 
 def approve(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
-    instance = db.get(ApprovalInstance, task.instance_id)
+    instance = WorkflowRepository(db).instance(task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
     _ensure_processable(instance, document)
 
@@ -97,11 +87,10 @@ def approve(db: Session, user: User, task_id: int, review_comment: str = "") -> 
         db.commit()
         return {"result": "approved", "next_node": nxt.node_name}
 
-    # 末节点通过 → 实例完成，单据 approved
+    # 末节点通过 → 实例完成，单据 approved（统一走状态机）
     instance.instance_status = "approved"
     instance.finished_at = datetime.utcnow()
-    _status_log(db, document, "approved", user.id, "末节点审批通过")
-    document.document_status = "approved"
+    document_state.transition(db, document, "approved", user.id, "末节点审批通过")
     audit_service.log(db, user, "approval:approve", "approval_task", str(task.id),
                       {"comment": review_comment})
     db.commit()
@@ -110,7 +99,7 @@ def approve(db: Session, user: User, task_id: int, review_comment: str = "") -> 
 
 def return_to_applicant(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
-    instance = db.get(ApprovalInstance, task.instance_id)
+    instance = WorkflowRepository(db).instance(task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
     _ensure_processable(instance, document)
 
@@ -119,8 +108,7 @@ def return_to_applicant(db: Session, user: User, task_id: int, review_comment: s
     _mark_processing(db, document, user.id)
     _finish_task(db, task, RETURNED)
     _cancel_instance(db, instance, RETURNED)
-    _status_log(db, document, RETURNED, user.id, "审批退回")
-    document.document_status = RETURNED
+    document_state.transition(db, document, RETURNED, user.id, "审批退回")
     audit_service.log(db, user, "approval:return", "approval_task", str(task.id),
                       {"comment": review_comment})
     db.commit()
@@ -129,7 +117,7 @@ def return_to_applicant(db: Session, user: User, task_id: int, review_comment: s
 
 def reject(db: Session, user: User, task_id: int, review_comment: str = "") -> dict:
     task = _get_owned_pending_task(db, user, task_id)
-    instance = db.get(ApprovalInstance, task.instance_id)
+    instance = WorkflowRepository(db).instance(task.instance_id)
     document = db.get(FinancialDocument, instance.document_id)
     _ensure_processable(instance, document)
 
@@ -138,8 +126,7 @@ def reject(db: Session, user: User, task_id: int, review_comment: str = "") -> d
     _mark_processing(db, document, user.id)
     _finish_task(db, task, REJECTED)
     _cancel_instance(db, instance, REJECTED)
-    _status_log(db, document, "rejected", user.id, "审批驳回")
-    document.document_status = "rejected"
+    document_state.transition(db, document, "rejected", user.id, "审批驳回")
     audit_service.log(db, user, "approval:reject", "approval_task", str(task.id),
                       {"comment": review_comment})
     db.commit()
@@ -149,7 +136,7 @@ def reject(db: Session, user: User, task_id: int, review_comment: str = "") -> d
 # ---------- 内部工具 ----------
 
 def _get_owned_pending_task(db: Session, user: User, task_id: int) -> ApprovalTask:
-    task = db.get(ApprovalTask, task_id)
+    task = WorkflowRepository(db).task(task_id)
     if task is None:
         raise HTTPException(404, "审批任务不存在")
     if task.task_status != PENDING:
@@ -162,34 +149,13 @@ def _get_owned_pending_task(db: Session, user: User, task_id: int) -> ApprovalTa
 
 
 def _workflow_nodes(db: Session, workflow_id: int) -> list[ApprovalWorkflowNode]:
-    return list(db.scalars(
-        select(ApprovalWorkflowNode)
-        .where(ApprovalWorkflowNode.workflow_id == workflow_id)
-        .order_by(ApprovalWorkflowNode.node_order.asc())
-    ).all())
+    return WorkflowRepository(db).nodes(workflow_id)
 
 
 def _match_workflow(db: Session, document: FinancialDocument) -> ApprovalWorkflow | None:
     """按 document_type + 金额区间 + 部门匹配启用流程。"""
-    wfs = db.scalars(
-        select(ApprovalWorkflow).where(
-            ApprovalWorkflow.document_type == document.document_type,
-            ApprovalWorkflow.status == "active",
-        )
-    ).all()
-    for wf in wfs:
-        cond = wf.match_conditions_json or {}
-        amount_min = Decimal(str(cond.get("amount_min", "0")))
-        amount_max = cond.get("amount_max")
-        if document.total_amount < amount_min:
-            continue
-        if amount_max is not None and document.total_amount > Decimal(str(amount_max)):
-            continue
-        dept = cond.get("department")
-        if dept and document.applicant_department != dept:
-            continue
-        return wf
-    return None
+    return WorkflowRepository(db).match_workflow(
+        document.document_type, document.total_amount, document.applicant_department)
 
 
 def _create_task(db: Session, instance: ApprovalInstance, node: ApprovalWorkflowNode) -> ApprovalTask:
@@ -213,24 +179,10 @@ def _ensure_processable(instance: ApprovalInstance, document: FinancialDocument)
         raise HTTPException(409, f"单据状态 {document.document_status} 不允许审批操作")
 
 
-def _status_log(db: Session, document: FinancialDocument, to_status: str,
-                operator_id: int, remark: str = "") -> None:
-    """写单据状态日志，operator 必须是真实操作人（P1-3）。"""
-    from app.models.document import DocumentStatusLog
-    db.add(DocumentStatusLog(
-        document_id=document.id,
-        from_status=document.document_status,
-        to_status=to_status,
-        operator_id=operator_id,
-        remark=remark,
-    ))
-
-
 def _mark_processing(db: Session, document: FinancialDocument, operator_id: int) -> None:
-    """首个任务被处理 → 单据进入 reviewing；operator 记真实审批人（P1-3）。"""
+    """首个任务被处理 → 单据进入 reviewing；统一走状态机，operator 记真实审批人（P1-3）。"""
     if document.document_status == "pending_review":
-        _status_log(db, document, "reviewing", operator_id, "审批处理开始")
-        document.document_status = "reviewing"
+        document_state.transition(db, document, "reviewing", operator_id, "审批处理开始")
 
 
 def _finish_task(db: Session, task: ApprovalTask, result: str) -> None:
@@ -242,12 +194,7 @@ def _cancel_instance(db: Session, instance: ApprovalInstance, status: str) -> No
     """return/reject/withdraw 共用：实例终态 + 未处理任务 cancelled。"""
     instance.instance_status = status
     instance.finished_at = datetime.utcnow()
-    tasks = db.scalars(
-        select(ApprovalTask).where(
-            ApprovalTask.instance_id == instance.id,
-            ApprovalTask.task_status == PENDING,
-        )
-    ).all()
+    tasks = WorkflowRepository(db).pending_tasks_of_instance(instance.id)
     for t in tasks:
         t.task_status = "cancelled"
         t.processed_at = datetime.utcnow()

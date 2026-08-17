@@ -213,10 +213,52 @@
 - 百度 access token 失效（401/110/111）自动清空重取一次；
 - 新增第二个审批人 sunqi（无分配任务，越权测试用）。
 
-### 待办
-- [ ] MySQL 实跑一次（本机 MySQL 8.0 服务 / Docker）
-- [ ] git init + 首次提交
-- [ ] 文档同步（architecture/function-map/DESIGN）
+### 17:00 - MySQL 实跑 + git 提交
+- 本机 MySQL80 服务已启动，但 root/atguigu 多次 Access denied（含用户给的多组密码）→ 用户指示"重建"：备份 Data→Data.bak，`mysqld --initialize-insecure` 重初始化，root 密码设为 Atguigu.123，创建 atguigu/Atguigu.123 + finance_risk 库。
+- **MySQL 全链路验证**：`seed.py` 5 单全提交、5 分析任务 succeeded（档位与 SQLite 一致，P1-7 新规则抓到 CP 合同"首付"vs单据"首付款"的真实表述差异）；`smoke_test.py` **34/34 PASS**。
+- 创建 `backend/.env`（atguigu/Atguigu.123，gitignored）；`.env.example` 同步；seed 等待上限 60→120s（MySQL 首跑较慢）。
+- 文档同步：architecture §7 终态守卫/§12 对话 fallback+冲突/§13 AI 风险说明/§10 确定性表述；function-map §1.5/§1.7/§2.8；DESIGN §1.8 "确定性规则"（不再叫纯函数）。
+- **git**：仓库已有历史（first commit + 一版修复），提交 `6ebc488`"第二轮修复 P0+P1+P2"。
+- 回归：pytest 40/40、compile OK、smoke SQLite 34/34 与 MySQL 34/34。
+
+### 最终状态
+- P0/P1/P2 全部落地并验证（SQLite + MySQL 双跑）。
+- 仍需人工确认：真实 LLM/OCR key（当前演示走 preset fallback）；MySQL Data.bak 原数据目录保留未删。
+
+---
+
+## 第三轮：缺陷修复 + 分层重构（收口）
+
+### 17:30 - P0 缺陷
+- **P0-1 明细重复 INSERT**（前端）：编辑页保存改为 diff 同步——已存在→PATCH、新增→POST、已删除→DELETE、未修改不重复插入；行带 `data-id` 追踪。后端契约冒烟验证（add2/patch/delete → 剩 1）。
+- **P0-2 type_fields 双向映射**：`DocumentOut.type_fields` 用 `validation_alias=type_fields_json` + `serialization_alias=type_fields`；顺带修 JSON 列不能存 Decimal/date（number→float、date→ISO 字符串）。
+- **P0-3 下载/导出带 JWT**：前端 `<a href>` 直链改 `API.download`（fetch + Authorization → Blob → objectURL）；`ui.js` 提供 dlAtt/dlExport。
+- **P0-7 `select(...).delete()`**：admin `_set_roles`/`update_role_permissions` 改为标准 `delete(...)`（此前是运行时错误，latent）。
+
+### 17:50 - P1 收口
+- **P1-7 workflow 校验**：document_type 合法、≥1 节点、node_order 唯一、approver_role 合法、amount_min≤max、角色下有可用用户。
+- **P1-8 防重复分析**：`create_or_get_task` 复用 queued/running 任务；新增 `GET /documents/{id}/analysis/latest`；前端风险 Tab 默认加载最新报告，仅显式"发起分析/重新分析"才新建。
+- **P1-12 附件删除级联**：删附件先删 parse_results + invoice_records。
+- **P1-13 状态参数**：前端 `document_status` → `status` 对齐后端。
+- **P1-14 supplier**：`total_paid` 只统计 approved；lookup import。
+- **P1-2 审批意见**：前端审批待办加意见输入，传 review_comment。
+
+### 18:10 - 后端分层重构
+- **clients/**：`clients/ocr/{base,baidu}.py`、`clients/llm/{base,deepseek}.py`；services 只依赖统一接口（原 services/ocr_client、llm_client 删除）。
+- **domain/**：`document_state.py`（状态机：guard/transition 唯一权威）、`access_policy.py`（L2+L3 收口）、`risk_engine/`（原 rule_engine 迁入，公开 build_context/run_all/compute_overall_level）。
+- **repositories/**：5 聚合（Document/Attachment/Workflow/Analysis/User），workflow/document/analysis 核心读路径已接入。
+- **事务边界（P0-8）**：`sysparam_service.set_value` 不再 commit，admin 统一一个事务提交参数+审计；login 审计改走 `audit_service`。
+- **前端收口**：共享工具抽到 `ui.js`；app.js 按 section 组织（views/* 子拆解记入后续）。
+
+### 18:30 - 稳定性修复（跑通落地）
+- **seed 同步跑分析**：改为 `asyncio.run(run_pipeline)` 逐任务同步执行（关闭后台入队），规避后台线程+SQLite 并发锁问题；服务器端仍走 enqueue 后台循环。
+- **SQLite WAL**：db/session 加 `PRAGMA journal_mode=WAL` + busy_timeout，支持多线程读写。
+- **冒烟幂等性**：冒烟含"审批通过"会消耗待办，要求每次配新 seed（已文档化）。
+
+### 19:00 - 验证与提交
+- pytest **41/41**；smoke_test **41/41**（SQLite 与 MySQL 双跑）。
+- 新增断言：明细 add/patch/delete 契约、type_fields 双向、空节点/非法角色 workflow 拒、角色权限 SQL、sys param 审计、create_or_get_task 复用。
+- 提交见 git log（本轮改动）。
 - [ ] 启动 Docker Desktop → 跑 MySQL 生产路径
 - [ ] 配置 DeepSeek + 百度云 key → 演示真 OCR/LLM 路径
 - [ ] 替换占位 PNG 为真实发票/合同样例图

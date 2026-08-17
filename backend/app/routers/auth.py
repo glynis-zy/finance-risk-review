@@ -11,7 +11,6 @@ from app.core.deps import bearer, get_current_user, get_db
 from app.core.perms import get_permission_codes
 from app.core.scopes import get_role_codes
 from app.core.security import create_access_token, revoke_token
-from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.auth import LoginRequest, TokenResponse, UserOut
 from app.services import audit_service, auth_service
@@ -26,10 +25,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise HTTPException(401, "用户名或密码错误")
 
     token = create_access_token(user.id, user.username)
-    db.add(AuditLog(
-        user_id=user.id, action_type="auth:login",
-        resource_type="user", resource_id=str(user.id),
-    ))
+    audit_service.log(db, user, "auth:login", "user", str(user.id))  # 统一走 audit_service
     db.commit()
     return TokenResponse(access_token=token, user=_to_out(db, user))
 

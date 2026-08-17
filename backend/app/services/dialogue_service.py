@@ -12,11 +12,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.clients import llm as llm_client
 from app.document_schemas import TYPE_LABELS, TYPE_FIELD_SCHEMAS
 from app.models.document import FinancialDocument
 from app.models.session import ReviewSession, SessionMessage
 from app.models.user import User
-from app.services import analysis_service, audit_service, document_service, llm_client
+from app.services import analysis_service, audit_service, document_service
 
 VALID_TYPES = set(TYPE_FIELD_SCHEMAS.keys())
 
@@ -170,9 +171,10 @@ def _find_document(db: Session, session: ReviewSession) -> FinancialDocument | N
 
 
 def _start_analysis(db: Session, session: ReviewSession, doc: FinancialDocument) -> tuple[str, str, int | None]:
-    task = analysis_service.create_task(db, doc.id, session_id=session.id)
+    task, created = analysis_service.create_or_get_task(db, doc.id, session_id=session.id)
     db.commit()
-    analysis_service.enqueue(task.id)
+    if created:
+        analysis_service.enqueue(task.id)
     reply = (
         f"已定位单据：{TYPE_LABELS.get(doc.document_type)} {doc.document_no}（{doc.total_amount} {doc.currency}）。"
         f"正在发起风险分析，任务编号 {task.id}，稍后可查看结果。"

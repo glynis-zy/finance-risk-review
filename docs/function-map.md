@@ -67,7 +67,7 @@
 | 接口 | 处理函数 | 调用 service | 职责 | 涉及表 |
 |---|---|---|---|---|
 | GET/POST `/api/v1/approval-workflows`，PATCH `/{id}` | `list/create/update_workflow()` | `workflow_service.*` | 流程定义 CRUD（管理员） | approval_workflows/nodes |
-| GET/POST `/api/v1/rules`，PATCH `/{id}` | `list/create/update_rule()` | `rule_engine.*_rule()` | 规则配置 CRUD（财务） | **risk_rules** |
+| GET/POST `/api/v1/rules`，PATCH `/{id}` | `list/create/update_rule()` | 直接操作 `RiskRule` 模型（+ `audit_service`） | 规则配置 CRUD（财务）；阈值由 `domain/risk_engine` 读取 | **risk_rules** |
 | GET `/api/v1/suppliers/{code}/risks` | `get_supplier_risks()` | `supplier_service.get_risks()` | 供应商档案+标签+黑名单+异常 | supplier_profiles |
 | PATCH `/api/v1/risk-findings/{fid}/review-status` | `update_finding_status()` | `analysis_service.update_finding_status()` | 人工确认/排除风险项 | risk_findings |
 | POST `/api/v1/review-reports/{rid}/manual-reviews` | `submit_manual_review()` | `report_service.submit_manual_review()` | **admin 可操作；approver 仅限自己审批任务范围内的单据报告（P0-1）** | manual_reviews |
@@ -99,23 +99,25 @@
 
 > **职责边界**：只更新 `document_attachments.parse_status` 五态（pending/parsing/succeeded/failed/manual_review），**不创建 analysis_tasks**——那是整单风险分析的任务载体（§2.6）。
 
-### 2.4 ocr_client（OCR 适配层，纯真实 API）
-`ocr_invoice(file)` → InvoiceFields（发票专用识别，失败抛 `ParseFailure`）
-`ocr_generic(file)` → {full_text, positions, confidence}（通用识别，失败抛 `ParseFailure`）
+### 2.4 clients/ocr（百度云适配层，纯真实 API）
+`clients/ocr/baidu.py: ocr_invoice(file)` → 发票字段（失败抛 `ParseFailure`）
+`clients/ocr/baidu.py: ocr_generic(file)` → {full_text, positions, confidence}
+`clients/ocr/base.py` 定义 `OcrClient` 接口与 `ParseFailure`（未来可加 paddle.py）
 
 > 预制结果处理不在本层，由 `parse_pipeline` 按 `ocr.mode` 三模式编排（见 §2.3）。
 
-### 2.5 llm_client（LLM 适配层）
-`extract_contract_fields(full_text) -> ContractFields`（Pydantic 校验，失败重试 1 次）
-`parse_dialogue_intent(text) -> SlotUpdate{type?, no?, intent?}`（Pydantic 校验）
+### 2.5 clients/llm（DeepSeek 适配层）
+`clients/llm/deepseek.py: extract_contract_fields(full_text) -> ContractFields`（Pydantic 校验）
+`parse_dialogue_intent(text) -> SlotUpdate`（Pydantic 校验）
 `polish_risk_report(summary, findings) -> markdown`（只换表达，不改结论）
+`clients/llm/base.py` 定义 `LLMClient` 接口（未来可加 local_vllm.py）
 
 ### 2.6 analysis_service（分析调度）
 `enqueue(document_id)` → 进程内 asyncio 队列（**仅单进程有效**）→ `run_pipeline(task)`:
 ```
 task_status 对齐规格 2.7.12：
 queued → querying_document → loading_attachments → parsing_attachments
-      → analyzing(rule_engine.run_all) → compute_overall_level(findings)   ← D2 公式
+      → analyzing(risk_engine.run_all) → compute_overall_level(findings)   ← D2 公式
       → report_service.generate(markdown) → succeeded / failed
 ```
 `get_status/get_findings/get_report/compare_amounts/update_finding_status`
@@ -124,8 +126,8 @@ queued → querying_document → loading_attachments → parsing_attachments
 
 > **analysis_tasks 只负责整单风险分析**（不是附件解析任务）；其 `parsing_attachments` 阶段顺带解析 `parse_status != succeeded` 的附件（复用 `parse_pipeline`，只更新附件 parse_status）。
 
-### 2.7 rule_engine（规则引擎）
-`REGISTRY: dict[rule_code, fn]` + `run_all(ctx) -> list[Finding]` + `load_config(risk_rules)`。
+### 2.7 domain/risk_engine（规则引擎，Domain 层）
+`domain/risk_engine/engine.py: REGISTRY + build_context(ctx) + run_all(ctx) -> list[Finding] + compute_overall_level + load_config(risk_rules)`。
 
 10 个规则函数（同一签名 `check_rule(ctx)`）：
 | rule_code | 函数名 | 判定要点 |

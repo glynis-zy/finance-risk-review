@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.scopes import visible_document_ids
-from app.models.attachment import DocumentAttachment
+from sqlalchemy import delete
+
+from app.models.attachment import AttachmentParseResult, DocumentAttachment, InvoiceRecord
 from app.models.document import FinancialDocument
 from app.models.user import User
 from app.services import audit_service, document_service
@@ -88,7 +90,10 @@ def delete(db: Session, user: User, doc_id: int, attachment_id: int) -> None:
     att = db.get(DocumentAttachment, attachment_id)
     if att is None or att.document_id != doc_id:
         raise HTTPException(404, "附件不存在")
-    # 删除文件 + 记录
+    # P1-12：删除附件时级联删除解析结果与发票记录，避免 MySQL FK 错误 / 脏数据
+    db.execute(delete(AttachmentParseResult).where(
+        AttachmentParseResult.attachment_id == attachment_id))
+    db.execute(delete(InvoiceRecord).where(InvoiceRecord.attachment_id == attachment_id))
     path = Path(settings.file_storage_path) / att.file_path
     if path.exists():
         path.unlink()

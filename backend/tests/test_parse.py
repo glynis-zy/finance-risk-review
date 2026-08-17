@@ -32,7 +32,7 @@ def test_parse_invoice_idempotent(db, monkeypatch):
                 "invoice_date": "2026-08-10", "amount_including_tax": 5000,
                 "tax_amount": 500, "amount_excluding_tax": 4500, "confidence": 0.99}
 
-    monkeypatch.setattr("app.services.ocr_client.ocr_invoice", fake_ocr)
+    monkeypatch.setattr("app.clients.ocr.ocr_invoice", fake_ocr)
 
     asyncio.run(parse_pipeline.parse_attachment(db, att))
     db.commit()

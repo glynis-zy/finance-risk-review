@@ -170,9 +170,21 @@ def create_analysis(
     user: User = Depends(require_perm("analysis:create")),
     db: Session = Depends(get_db),
 ):
-    """创建风险分析任务（对话/审批页"发起分析"入口）。"""
+    """创建风险分析任务（对话/审批页"发起分析"入口）。
+    P1-8：若当前已有 queued/运行中任务则复用，防止重复执行。"""
     document_service.ensure_viewable(db, user, document_id)
-    task = analysis_service.create_task(db, document_id)
+    task, created = analysis_service.create_or_get_task(db, document_id)
     db.commit()
-    analysis_service.enqueue(task.id)
-    return {"task_id": task.id, "task_status": task.task_status}
+    if created:
+        analysis_service.enqueue(task.id)
+    return {"task_id": task.id, "task_status": task.task_status, "created": created}
+
+
+@router.get("/{document_id}/analysis/latest")
+def get_latest_analysis(
+    document_id: int,
+    user: User = Depends(require_perm("analysis:view")),
+    db: Session = Depends(get_db),
+):
+    """风险 Tab 默认加载：当前文档最新分析任务 + 报告（P1-8，不自动新建）。"""
+    return analysis_service.latest_for_document(db, user, document_id)

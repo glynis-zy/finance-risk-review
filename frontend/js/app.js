@@ -1,18 +1,5 @@
-/* 前端主逻辑：hash 路由 + 视图渲染（原生 JS，无框架）。 */
-const TYPE_LABELS = {
-  company_payment: '对公付款单', advance_payment: '预付款单', batch_payment: '批量付款单',
-  expense: '费用报销单', travel: '差旅报销单',
-};
-const STATUS_LABELS = {
-  draft: '草稿', pending_review: '待审批', reviewing: '审批中', returned: '已退回',
-  approved: '已通过', rejected: '已驳回', withdrawn: '已撤回', voided: '已作废',
-};
-
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmt = (n) => Number(n ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 });
-const badge = (lvl) => `<span class="badge ${lvl}">${lvl}</span>`;
-const stBadge = (st) => `<span class="badge ${st === 'approved' ? 'low' : st === 'rejected' || st === 'voided' ? 'high' : st === 'draft' ? 'neutral' : 'pending'}">${STATUS_LABELS[st] || st}</span>`;
+/* 前端主逻辑：hash 路由 + 视图渲染（原生 JS，无框架）。
+   共享工具（esc/fmt/badge/TYPE_LABELS/下载等）在 ui.js；视图按 section 组织。 */
 
 /* ---------- 工具：动态表单（元数据驱动） ---------- */
 function typeFieldsHTML(fields, values) {
@@ -78,11 +65,6 @@ async function doLogin() {
 window.doLogin = doLogin;
 async function doLogout() { await API.logout(); nav(); }
 window.doLogout = doLogout;
-async function openSupplier(name) {
-  try { const r = await API.supplierLookup(name); location.hash = '#/supplier/' + r.supplier_code; }
-  catch (e) { alert('未找到供应商档案：' + name); }
-}
-window.openSupplier = openSupplier;
 
 /* ---------- 布局 ---------- */
 function layoutHTML(active) {
@@ -156,7 +138,7 @@ async function documentsView(el) {
     const no = document.getElementById('f-no').value;
     const ty = document.getElementById('f-type').value;
     const st = document.getElementById('f-status').value;
-    if (no) q.document_no = no; if (ty) q.document_type = ty; if (st) q.document_status = st;
+    if (no) q.document_no = no; if (ty) q.document_type = ty; if (st) q.status = st;  // P1-13 与后端 status 对齐
     const data = await API.listDocs(q);
     document.getElementById('doc-table').innerHTML = `
       <thead><tr><th>编号</th><th>类型</th><th>申请人</th><th>部门</th><th>金额</th><th>状态</th><th>操作</th></tr></thead>
@@ -185,9 +167,11 @@ async function documentsView(el) {
 async function docEditView(el, id) {
   const types = await API.docTypes();
   let doc = null, lineItems = [], attachments = [];
+  let origLineItemIds = [];
   if (id && id !== 'new') {
     const detail = await API.getDoc(id);
     doc = detail.document; lineItems = detail.line_items || []; attachments = detail.attachments || [];
+    origLineItemIds = lineItems.map(l => l.id).filter(Boolean);  // P0-1：用于删除同步
   }
   const type = doc ? doc.document_type : types[0].document_type;
   const schema = types.find(t => t.document_type === type);
@@ -230,7 +214,7 @@ async function docEditView(el, id) {
   window.renderLi = () => {
     const tb = document.querySelector('#li-table tbody');
     tb.innerHTML = lineItems.map((li, i) => `
-      <tr data-i="${i}">
+      <tr data-i="${i}" data-id="${li.id || ''}">
         <td><select class="li-type"><option ${li.item_type === 'payment' ? 'selected' : ''}>payment</option><option ${li.item_type !== 'payment' ? 'selected' : ''}>expense</option></select></td>
         <td><input class="li-name" value="${esc(li.item_name)}"></td>
         <td><input class="li-spec" value="${esc(li.specification || '')}" placeholder="规格"></td>
@@ -251,7 +235,7 @@ async function docEditView(el, id) {
       <tbody>${attachments.map(a => `
         <tr><td>${esc(a.file_name)}</td><td>${a.file_type}</td>
         <td>${esc(a.parse_status)}</td>
-        <td><a class="btn ghost sm" href="${API.attUrl(doc ? doc.id : id, a.id)}" target="_blank">下载</a>
+        <td><button class="btn ghost sm" onclick="dlAtt(${doc ? doc.id : id}, ${a.id}, '${esc(a.file_name)}')">下载</button>
             <button class="btn ghost sm" onclick="parseAtt(${a.id})">解析</button>
             <button class="btn danger sm" onclick="delAtt(${a.id})">删除</button></td></tr>`).join('')}
       </tbody></table>`;
@@ -286,9 +270,11 @@ async function docEditView(el, id) {
     try {
       let saved = did ? await API.updateDoc(did, body) : await API.createDoc(body);
       const sid = saved.id;
-      // 保存明细
+      // 保存明细（P0-1）：已存在且修改→PATCH，新增→POST，已存在但删除→DELETE，未修改不重复插入
       const rows = [...document.querySelectorAll('#li-table tbody tr')];
+      const keptIds = [];
       for (const row of rows) {
+        const rid = row.dataset.id;
         const it = {
           item_type: row.querySelector('.li-type').value,
           item_name: row.querySelector('.li-name').value,
@@ -299,7 +285,12 @@ async function docEditView(el, id) {
           amount: row.querySelector('.li-amt').value,
           remark: row.querySelector('.li-rem').value || null,
         };
-        if (it.item_name || it.amount) await API.addLineItem(sid, it);
+        if (!it.item_name && !it.amount) continue;   // 空行跳过
+        if (rid) { keptIds.push(Number(rid)); await API.updateLineItem(sid, rid, it); }
+        else { await API.addLineItem(sid, it); }
+      }
+      for (const oid of origLineItemIds) {
+        if (!keptIds.includes(oid)) await API.delLineItem(sid, oid);   // 已删除 → 数据库同步删
       }
       // 上传附件
       const f = document.getElementById('att-file').files[0];
@@ -382,33 +373,57 @@ async function amountTab(body, did) {
 }
 
 async function riskTab(body, did, docId) {
-  const amt = await API.amountCompare(did);
-  let taskId = null;
-  try {
-    const t = await API.createAnalysis(did);
-    taskId = t.task_id;
-  } catch (e) { taskId = null; }
-  if (taskId === null) {
-    // 若创建失败，尝试从已有报告（兜底：无报告入口则提示）
-    body.innerHTML = `<div class="msg error">无法发起分析：${esc('请检查单据是否已提交')}</div>`;
+  const latest = await API.docAnalysisLatest(did);          // P1-8：默认加载最新，不自动新建
+  if (latest.report) {
+    const findings = await API.findings(latest.task_id);
+    body.innerHTML = riskHTML(latest.report, findings);
+    bindRiskActions(body, findings);
     return;
   }
+  if (latest.task_id && latest.task_status !== 'succeeded' && latest.task_status !== 'failed') {
+    pollTask(body, latest.task_id);
+    return;
+  }
+  body.innerHTML = `<div class="msg info">该单据尚无风险分析报告。</div>
+    <div class="toolbar mt"><button class="btn ok" onclick="startAnalysisFromTab(${did}, this)">发起分析</button></div>`;
+}
+
+async function pollTask(body, taskId) {
   body.innerHTML = `<div class="msg info">分析任务 ${taskId} 执行中…</div>`;
   const timer = setInterval(async () => {
     try {
       const st = await API.taskStatus(taskId);
       if (st.task_status === 'succeeded' || st.task_status === 'failed') {
         clearInterval(timer);
-        const rep = await API.report(taskId);
-        const findings = await API.findings(taskId);
-        body.innerHTML = riskHTML(rep, findings);
-        bindRiskActions(body, findings);
+        if (st.task_status === 'succeeded') {
+          const rep = await API.report(taskId);
+          const findings = await API.findings(taskId);
+          body.innerHTML = riskHTML(rep, findings);
+          bindRiskActions(body, findings);
+        } else {
+          body.innerHTML = `<div class="msg error">分析失败：${esc(st.error_message || '')}</div>`;
+        }
       } else {
         body.innerHTML = `<div class="msg info">分析中：${esc(st.current_step || st.task_status)}</div>`;
       }
     } catch (e) { clearInterval(timer); body.innerHTML = `<div class="msg error">${esc(e.message)}</div>`; }
   }, 2000);
 }
+
+async function startAnalysisFromTab(did, btn) {
+  btn.disabled = true;
+  try {
+    const t = await API.createAnalysis(did);
+    pollTask(document.getElementById('tab-body'), t.task_id);
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
+window.startAnalysisFromTab = startAnalysisFromTab;
+
+async function reAnalyze(docId) {
+  try { await API.createAnalysis(docId); location.hash = '#/document/' + docId; }
+  catch (e) { alert(e.message); }
+}
+window.reAnalyze = reAnalyze;
 
 function riskHTML(rep, findings) {
   return `<h3>整体风险：${badge(rep.overall_risk_level)}　建议：${esc(rep.recommendation)}</h3>
@@ -423,7 +438,8 @@ function riskHTML(rep, findings) {
       <option ${f.review_status === 'dismissed' ? 'selected' : ''} value="dismissed">排除</option></select></td></tr>`).join('') || '<tr><td colspan=8>无风险项</td></tr>'}
     </tbody></table>
     <div class="toolbar mt">
-      <a class="btn ghost sm" href="${API.exportUrl(rep.report_id)}" target="_blank">导出报告(HTML)</a>
+      <button class="btn ghost sm" onclick="dlExport(${rep.report_id})">导出报告(HTML)</button>
+      <button class="btn ok sm" onclick="reAnalyze(${rep.document_id})">重新分析</button>
     </div>
     <div class="card mt"><h3>人工复核</h3>
       <div class="grid">
@@ -452,7 +468,7 @@ function attTabHTML(detail) {
     <tbody>${(detail.attachments || []).map(a => `
       <tr><td>${esc(a.file_name)}</td><td>${a.file_type}</td><td>${(a.file_size / 1024).toFixed(1)}KB</td>
       <td>${esc(a.parse_status)}</td>
-      <td><a class="btn ghost sm" href="${API.attUrl(detail.document.id, a.id)}" target="_blank">下载/预览</a>
+      <td><button class="btn ghost sm" onclick="dlAtt(${detail.document.id}, ${a.id}, '${esc(a.file_name)}')">下载/预览</button>
       <button class="btn ghost sm" onclick="tryParse(${a.id})">解析</button></td></tr>`).join('') || '<tr><td colspan=5>无附件</td></tr>'}
     </tbody></table>`;
 }
@@ -500,23 +516,25 @@ async function chatView(el) {
 async function approvalsView(el) {
   const tasks = await API.myTasks();
   el.innerHTML = `<div class="card"><h3>我的审批待办</h3>
-    <table><thead><tr><th>节点</th><th>单据</th><th>类型</th><th>金额</th><th>部门</th><th>操作</th></tr></thead>
+    <table><thead><tr><th>节点</th><th>单据</th><th>类型</th><th>金额</th><th>部门</th><th>审批意见</th><th>操作</th></tr></thead>
     <tbody>${tasks.map(t => `
       <tr><td>${esc(t.node_name)}</td><td class="mono"><a href="#/document/${t.document_id}">${esc(t.document_no)}</a></td>
       <td>${TYPE_LABELS[t.document_type] || t.document_type}</td><td>¥${fmt(t.total_amount)}</td>
       <td>${esc(t.applicant_department)}</td>
+      <td><input data-cmt="${t.task_id}" placeholder="审批意见（可选）" style="min-width:150px"></td>
       <td>
         <a class="btn ghost sm" href="#/document/${t.document_id}">详情</a>
         <button class="btn ok sm" onclick="actTask(${t.task_id},'approve')">通过</button>
         <button class="btn warn sm" onclick="actTask(${t.task_id},'return')">退回</button>
         <button class="btn danger sm" onclick="actTask(${t.task_id},'reject')">驳回</button>
-      </td></tr>`).join('') || '<tr><td colspan=6>暂无待办</td></tr>'}
+      </td></tr>`).join('') || '<tr><td colspan=7>暂无待办</td></tr>'}
     </tbody></table></div>`;
   window.actTask = async (id, a) => {
     const fn = { approve: API.approveTask, return: API.returnTask, reject: API.rejectTask }[a];
+    const cmt = (document.querySelector(`[data-cmt="${id}"]`) || {}).value || '';
     const r = confirm(a === 'approve' ? '确认通过该审批？' : a === 'return' ? '确认退回修改？' : '确认驳回？');
     if (!r) return;
-    try { await fn(id); alert(a === 'approve' ? '已通过' : a === 'return' ? '已退回' : '已驳回'); approvalsView(el); }
+    try { await fn(id, cmt); alert(a === 'approve' ? '已通过' : a === 'return' ? '已退回' : '已驳回'); approvalsView(el); }
     catch (e) { alert(e.message); }
   };
 }

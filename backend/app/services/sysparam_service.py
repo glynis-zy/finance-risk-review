@@ -51,12 +51,12 @@ def all(db: Session) -> list[dict]:
 
 
 def set_value(db: Session, key: str, value: str, user: User) -> SysParam:
+    """更新参数（P0-8：不在此提交，由调用方统一在一个事务里 commit + 审计）。"""
     row = db.scalar(select(SysParam).where(SysParam.param_key == key))
     if row is None:
         row = SysParam(param_key=key, param_value=value, description=DEFAULTS.get(key, ("", ""))[1])
         db.add(row)
     row.param_value = value
     row.updated_by = user.id
-    db.commit()
-    db.refresh(row)
+    db.flush()
     return row

@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
-"""LLM 适配层（DeepSeek，OpenAI 兼容接口）。
+"""DeepSeek LLM 实现（OpenAI 兼容接口，模块级函数，接口见 base.LLMClient）。
 
-职责（用户确认的四层分工）：
-- LLM 负责"理解非结构化文本"：合同字段提取、对话意图解析；
-- LLM 负责"自然语言解释"：风险说明/处理建议润色；
-- LLM 绝不负责最终风险判定（规则引擎负责）。
-厂商可换：只改 settings.LLM_BASE_URL/API_KEY/MODEL，本文件不涉及业务。
+LLM 输出必须是严格 JSON，经 Pydantic 校验后才进入业务；失败返回 None（降级），
+绝不参与最终风险判定（规则引擎负责）。
 """
 import json
 import logging
@@ -65,7 +62,7 @@ def extract_contract_fields(full_text: str) -> ContractFields | None:
 
 
 def parse_dialogue_intent(text: str) -> SlotUpdate | None:
-    """对话输入 → 槽位更新（LLM NLU，失败退回纯槽位问答）。"""
+    """对话输入 → 槽位更新（LLM NLU，失败退回本地规则解析）。"""
     system = (
         "你是财务审核对话的意图解析器。从用户一句话中抽出："
         "document_type(单据类型，若提到，取 company_payment/advance_payment/batch_payment/expense/travel 之一，"
@@ -77,9 +74,9 @@ def parse_dialogue_intent(text: str) -> SlotUpdate | None:
 
 
 def polish_risk_report(summary: str, findings: list[dict]) -> str:
-    """把规则引擎结论润色为业务人员易读的 Markdown 报告（只换表达，不改结论）。"""
+    """把规则引擎结论润色为业务人员易读的 Markdown 叙述（只换表达，不改结论）。"""
     system = (
-        "你是财务审核报告撰写助手。基于给定的风险结论，写一段面向业务人员的 Markdown 报告。"
+        "你是财务审核报告撰写助手。基于给定的风险结论，写一段面向业务人员的 Markdown 风险说明。"
         "要求：不得新增或删改结论本身；结构清晰；语言简洁商务。"
     )
     try:

@@ -4,8 +4,8 @@
 权限码：user:manage / role:manage / system:manage。
 """
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
@@ -22,7 +22,7 @@ class UserCreate(BaseModel):
     username: str
     display_name: str
     password: str
-    role_codes: list[str] = []
+    role_codes: list[str] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
@@ -107,7 +107,7 @@ def update_user(
 
 
 def _set_roles(db: Session, user_id: int, role_codes: list[str]) -> None:
-    db.execute(select(UserRole).where(UserRole.user_id == user_id).delete())
+    db.execute(delete(UserRole).where(UserRole.user_id == user_id))
     for code in role_codes:
         role = db.scalar(select(Role).where(Role.role_code == code))
         if role:
@@ -142,7 +142,7 @@ def update_role_permissions(
     role = db.get(Role, role_id)
     if role is None:
         raise HTTPException(404, "角色不存在")
-    db.execute(select(RolePermission).where(RolePermission.role_id == role_id).delete())
+    db.execute(delete(RolePermission).where(RolePermission.role_id == role_id))
     for code in payload.permission_codes:
         perm = db.scalar(select(Permission).where(Permission.permission_code == code))
         if perm:
@@ -181,4 +181,5 @@ def update_sys_param(
     p = sysparam_service.set_value(db, param_key, payload.param_value, user)
     audit_service.log(db, user, "sys_param:update", "sys_param", param_key,
                       {"value": payload.param_value})
+    db.commit()  # P0-8：参数更新 + 审计日志同事务提交
     return {"param_key": p.param_key, "param_value": p.param_value}

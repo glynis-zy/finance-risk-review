@@ -21,10 +21,10 @@ def get_risks(db: Session, supplier_code: str) -> dict:
     if supplier is None:
         raise HTTPException(404, "供应商不存在")
 
-    # 历史付款：按供应商名称/收款单位统计已通过单据
+    # 历史付款：只统计已通过（approved）单据，未审批/审批中的不算"累计付款"（P1-14）
     history = db.scalars(select(FinancialDocument).where(
         FinancialDocument.payee_name == supplier.supplier_name,
-        FinancialDocument.document_status.in_(["approved", "pending_review", "reviewing"]),
+        FinancialDocument.document_status == "approved",
     ).order_by(FinancialDocument.apply_date.desc())).all()
 
     total_paid = sum(d.total_amount for d in history)

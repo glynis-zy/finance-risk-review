@@ -86,27 +86,24 @@
 │    analysis · approvals · workflows · rules · suppliers ·     │
 │    reports · audit                                             │
 │                                                               │
-│  services/（业务逻辑，可被测试复用）                            │
-│    auth_service       认证/RBAC/令牌撤销                        │
-│    document_service   单据 CRUD/版本/状态机/数据权限过滤         │
-│    workflow_service   审批流程匹配/实例/节点流转/任务            │
-│    parse_pipeline     文档类型识别→OCR适配→LLM提取→Pydantic     │
-│    rule_engine        10 条规则注册表 + risk_rules 配置         │
-│    analysis_service   聚合数据→跑规则→写 findings→生成报告       │
-│    dialogue_service   LLM NLU + 槽位状态机（多轮对话）           │
-│    supplier_service   供应商档案/风险标签/黑名单                 │
-│    report_service     报告 markdown→HTML 导出                   │
-│    audit_service      操作审计                                  │
-│    llm_client         DeepSeek 适配层（结构化输出+Pydantic）     │
-│    ocr_client         百度云 OCR 适配层（发票+通用，纯真实API）   │
+│  services/（UseCase 编排）                                       │
+│    auth/document/workflow/analysis/attachment/dialogue/         │
+│    parse_pipeline/report/supplier/sysparam/audit                │
+│  repositories/（数据访问聚合）                                    │
+│    Document / Attachment / Workflow / Analysis / User           │
+│  domain/（业务规则）                                              │
+│    document_state（状态机） · access_policy（L2+L3） ·           │
+│    risk_engine（10 条规则 + build_context + 整体等级）            │
+│  clients/（外部服务隔离）                                         │
+│    ocr(base+baidu) · llm(base+deepseek)                          │
 │                                                               │
-│  core/        config · security · perms(RBAC) · deps           │
+│  core/        config · security · perms(RBAC) · scopes · deps  │
 │  db/          session · base · (表结构见 §6)                    │
 │                                                               │
-│  异步分析流水线：asyncio 队列 → 解析 → 分析 → 报告，状态可轮询    │
+│  异步分析流水线：asyncio 队列（单进程 Demo）→ 解析 → 分析 → 报告   │
 └───────────────┬───────────────────────────────────────────────┘
                 ▼
-        MySQL 8（21+ 表，见 §6）
+        MySQL 8（25+4 张表，见 §6）
 ```
 
 ---
@@ -114,6 +111,19 @@
 ## 5. 模块清单
 
 ### 5.1 后端模块（对应 2.7.9）
+
+**分层结构**（Router 薄 / Service 编排 / Repository 管 SQL / Domain 管业务 / Client 隔离外部）：
+
+```
+routers/      HTTP + Depends（薄控制器）
+services/     UseCase 编排（查单→权限→状态→完整性→新版本→审批→分析→审计→commit）
+repositories/ 数据访问聚合（Document/Attachment/Workflow/Analysis/User，不一张表一个 repo）
+domain/       状态机 document_state / 访问策略 access_policy / 风险引擎 risk_engine
+clients/      OCR（base+baidu）/ LLM（base+deepseek），上层只依赖统一接口
+models/       SQLAlchemy ORM
+core/         config/security/perms/scopes/deps
+```
+
 
 | 模块 | 职责 | 核心服务 |
 |---|---|---|
@@ -123,10 +133,13 @@
 | 明细 | 费用明细、付款明细、金额计算、合计校验 | `document_service` |
 | 附件 | 上传/下载/删除/格式校验/访问控制/解析任务 | `attachment_service` |
 | 审批流程 | 流程定义、条件匹配、实例、节点流转、任务 | `workflow_service` |
-| 文档解析 | 类型识别、OCR、LLM 提取、证据定位 | `parse_pipeline` |
-| 规则引擎 | 10 条规则、阈值配置、金额容差/费用标准/市场价/异常 | `rule_engine` |
+| 文档解析 | 类型识别、OCR/LLM、证据定位、三模式编排 | `parse_pipeline` + `clients/ocr·llm` |
+| 规则引擎 | 10 条规则、阈值配置、金额容差/费用标准/市场价/异常 | `domain/risk_engine` |
 | 智能分析 | 聚合数据、跑规则、生成 findings 与报告 | `analysis_service` |
 | 供应商 | 档案、风险标签、黑名单、历史交易 | `supplier_service` |
+| 数据访问 | 单据/附件/流程/分析/用户聚合查询 | `repositories/*` |
+| 状态机 | 动作守卫 + 状态流转 + 状态日志 | `domain/document_state` |
+| 访问策略 | L2 可见 / 归属 / L3 状态权限收口 | `domain/access_policy` |
 | 报告 | 风险结果保存、面板数据、导出 | `report_service` |
 | 审核 | 人工复核意见、风险项处理状态、最终审批结果 | 并入 `approval/analysis` |
 | 日志 | 接口/附件/规则变更/分析任务/审批审计 | `audit_service` |

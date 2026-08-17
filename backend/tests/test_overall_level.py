@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """整体风险等级公式（D2）纯函数测试：最高单项 + 数量升级。"""
-from app.services.rule_engine import Finding, compute_overall_level
+from app.domain.risk_engine import Finding, compute_overall_level
 
 
 def _finding(level: str) -> Finding:

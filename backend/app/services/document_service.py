@@ -12,14 +12,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.scopes import get_role_codes, visible_document_ids
+from app.core.scopes import visible_document_ids
 from app.document_schemas import REQUIRED_ATTACHMENTS, TYPE_LABELS, validate_type_fields
 from app.models.analysis import AnalysisTask
 from app.models.attachment import AttachmentParseResult, DocumentAttachment
 from app.models.document import (
     DOCUMENT_TYPES,
     DocumentLineItem,
-    DocumentStatusLog,
     DocumentVersion,
     FinancialDocument,
 )
@@ -34,19 +33,10 @@ from app.schemas.document import (
 )
 from app.services import analysis_service, audit_service, workflow_service
 
-# 状态常量
-DRAFT, PENDING, REVIEWING, RETURNED = "draft", "pending_review", "reviewing", "returned"
-APPROVED, REJECTED, WITHDRAWN, VOIDED = "approved", "rejected", "withdrawn", "voided"
-
-# L3 状态守卫表：动作 → 允许的当前状态
-# submit 同时承担"首次提交"(draft) 与"退回后重提交"(returned)：
-# returned 提交时同样生成新版本 + 新审批实例 + 新分析任务。
-GUARD: dict[str, set[str]] = {
-    "edit": {DRAFT, RETURNED},
-    "submit": {DRAFT, RETURNED},
-    "withdraw": {PENDING},
-    "void": {DRAFT, PENDING},
-}
+from app.domain import access_policy, document_state
+from app.domain.document_state import (
+    DRAFT, PENDING, RETURNED, VOIDED, WITHDRAWN,
+)
 
 _TYPE_ABBR = {
     "company_payment": "CP", "advance_payment": "AP", "batch_payment": "BP",
@@ -55,40 +45,25 @@ _TYPE_ABBR = {
 
 
 def _ensure_visible(db: Session, user: User, doc_id: int) -> FinancialDocument:
-    """L2 数据权限：用户必须能看到该单据。"""
-    ids = visible_document_ids(db, user)
+    """L2：取单据并校验可见（委托 domain/access_policy）。"""
     doc = db.get(FinancialDocument, doc_id)
     if doc is None:
         raise HTTPException(404, "单据不存在")
-    if ids is not None and doc.id not in ids:
-        raise HTTPException(403, "无权访问该单据")
+    access_policy.ensure_visible(db, user, doc)
     return doc
 
 
 def _ensure_owner(db: Session, user: User, doc: FinancialDocument) -> None:
-    """申请人本人或管理员才可对单据执行写操作。"""
-    roles = get_role_codes(db, user.id)
-    if doc.applicant_id != user.id and "admin" not in roles:
-        raise HTTPException(403, "仅申请人本人或管理员可操作该单据")
+    access_policy.ensure_owner(db, user, doc)
 
 
 def _guard(doc: FinancialDocument, action: str) -> None:
-    """L3 状态权限：动作在当前状态是否允许。"""
-    allowed = GUARD.get(action, set())
-    if doc.document_status not in allowed:
-        raise HTTPException(409, f"状态 {doc.document_status} 不允许该操作")
+    document_state.guard(doc, action)
 
 
 def _transition(db: Session, doc: FinancialDocument, to_status: str,
                 operator: User, remark: str = "") -> None:
-    db.add(DocumentStatusLog(
-        document_id=doc.id,
-        from_status=doc.document_status,
-        to_status=to_status,
-        operator_id=operator.id,
-        remark=remark,
-    ))
-    doc.document_status = to_status
+    document_state.transition(db, doc, to_status, operator.id, remark)
 
 
 def _snapshot(db: Session, doc: FinancialDocument, operator: User, version_no: int) -> None:
@@ -342,25 +317,16 @@ def query(db: Session, user: User, *, document_type: str | None = None,
 
 def get_detail(db: Session, user: User, doc_id: int) -> dict:
     doc = _ensure_visible(db, user, doc_id)
-    line_items = db.scalars(
-        select(DocumentLineItem).where(DocumentLineItem.document_id == doc.id)
-    ).all()
-    attachments = db.scalars(
-        select(DocumentAttachment).where(DocumentAttachment.document_id == doc.id)
-    ).all()
-    versions = db.scalars(
-        select(DocumentVersion).where(DocumentVersion.document_id == doc.id)
-        .order_by(DocumentVersion.version_no.desc())
-    ).all()
-    instance = db.scalars(
-        select(ApprovalInstance).where(ApprovalInstance.document_id == doc.id)
-        .order_by(ApprovalInstance.id.desc())
-    ).first()
-    tasks = []
-    if instance:
-        tasks = db.scalars(
-            select(ApprovalTask).where(ApprovalTask.instance_id == instance.id)
-        ).all()
+    from app.repositories.attachment_repo import AttachmentRepository
+    from app.repositories.document_repo import DocumentRepository
+    from app.repositories.workflow_repo import WorkflowRepository
+    doc_repo, att_repo, wf_repo = DocumentRepository(db), AttachmentRepository(db), WorkflowRepository(db)
+    line_items = doc_repo.line_items(doc.id)
+    attachments = att_repo.list_by_document(doc.id)
+    versions = doc_repo.versions(doc.id)
+    instances = wf_repo.instances_of_document(doc.id)
+    instance = instances[0] if instances else None
+    tasks = wf_repo.tasks_of_instance(instance.id) if instance else []
     return {
         "document": DocumentOut.model_validate(doc),
         "line_items": _line_items_out(line_items),

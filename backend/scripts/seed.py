@@ -417,21 +417,31 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
 
 
 def submit_all(db, docs) -> None:
-    for doc, user in docs:
-        document_service.submit(db, user, doc.id)
-        print(f"[seed] 已提交 {doc.document_no} -> {doc.document_status}")
-    # 等待后台分析全部进入终态（succeeded/failed/cancelled），最多 120s（MySQL 首次较慢）
-    terminal = {"succeeded", "failed", "cancelled"}
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        pending = db.scalars(select(AnalysisTask).where(
-            AnalysisTask.task_status.notin_(terminal))).all()
-        if not pending:
-            break
-        time.sleep(0.5)
-    tasks = db.scalars(select(AnalysisTask)).all()
+    """提交全部单据，并【同步】跑完分析流水线。
+
+    演示数据脚本不做后台异步：直接用 asyncio.run 逐任务跑 run_pipeline，
+    避免后台线程 + SQLite 的并发锁问题，保证 seed 后链路立即可用。
+    服务器（uvicorn）端仍走 analysis_service.enqueue 的后台循环。
+    """
+    import asyncio
+
+    from app.services import analysis_service
+
+    real_enqueue = analysis_service.enqueue
+    analysis_service.enqueue = lambda task_id: None  # 关闭后台入队，改同步跑
+    try:
+        for doc, user in docs:
+            document_service.submit(db, user, doc.id)
+            print(f"[seed] 已提交 {doc.document_no} -> {doc.document_status}")
+    finally:
+        analysis_service.enqueue = real_enqueue
+
+    tasks = list(db.scalars(select(AnalysisTask)).all())
     for t in tasks:
-        print(f"[seed] 分析任务 {t.id} 状态 {t.task_status}")
+        asyncio.run(analysis_service.run_pipeline(t.id))
+        db.expire_all()  # 重新读最新状态
+        cur = db.get(AnalysisTask, t.id)
+        print(f"[seed] 分析任务 {t.id} 状态 {cur.task_status}")
 
 
 def main() -> None:

@@ -41,6 +41,55 @@ def create_task(db: Session, document_id: int, session_id: int | None = None) ->
     return task
 
 
+def _running_task(db: Session, document_id: int) -> AnalysisTask | None:
+    """当前文档是否已有 queued/运行中的分析任务（P1-8 防重复）。"""
+    from app.repositories.analysis_repo import AnalysisRepository
+    return AnalysisRepository(db).running_task(document_id)
+
+
+def create_or_get_task(db: Session, document_id: int,
+                       session_id: int | None = None) -> tuple[AnalysisTask, bool]:
+    """发起分析：已有运行中任务则复用（不新建），否则创建。返回 (task, 是否新建)。"""
+    running = _running_task(db, document_id)
+    if running is not None:
+        return running, False
+    return create_task(db, document_id, session_id), True
+
+
+def latest_for_document(db: Session, user: User, document_id: int) -> dict:
+    """当前文档最新分析任务 + 报告（风险 Tab 默认加载，P1-8）。"""
+    from app.repositories.analysis_repo import AnalysisRepository
+    ids = visible_document_ids(db, user)
+    if ids is not None and document_id not in ids:
+        raise HTTPException(403, "无权访问该单据")
+    repo = AnalysisRepository(db)
+    task = repo.latest_task(document_id)
+    if task is None:
+        return {"task_id": None, "task_status": None, "report": None}
+    report = repo.report(task.id)
+    return {
+        "task_id": task.id,
+        "task_status": task.task_status,
+        "current_step": task.current_step,
+        "report": _report_payload(report, task) if report is not None else None,
+    }
+
+
+def _report_payload(report, task) -> dict:
+    """报告基础载荷（与 get_report 保持一致的结构）。"""
+    return {
+        "report_id": report.id,
+        "task_id": report.task_id,
+        "document_id": report.document_id,
+        "overall_risk_level": report.overall_risk_level,
+        "risk_summary": report.risk_summary_json,
+        "amount_comparison": report.amount_comparison_json,
+        "recommendation": report.recommendation,
+        "report_markdown": report.report_markdown,
+        "created_at": str(report.created_at),
+    }
+
+
 def compare_amounts(db: Session, user: User, doc_id: int) -> AmountComparisonOut:
     """金额核对面板：单据/明细/发票/合同/付款金额对照（规格 2.7.13）。"""
     doc = db.get(FinancialDocument, doc_id)
@@ -163,10 +212,11 @@ def enqueue(task_id: int) -> None:
 async def run_pipeline(task_id: int) -> None:
     """分析流水线：querying_document → loading_attachments → parsing_attachments → analyzing → succeeded。"""
     from app.db.session import SessionLocal
+    from app.domain.risk_engine import build_context, compute_overall_level, run_all
     from app.models.analysis import RiskFinding
     from app.models.attachment import DocumentAttachment
     from app.models.document import FinancialDocument
-    from app.services import parse_pipeline, report_service, rule_engine
+    from app.services import parse_pipeline, report_service
 
     db = SessionLocal()
     try:
@@ -194,9 +244,9 @@ async def run_pipeline(task_id: int) -> None:
 
         _stage(db, task, "analyzing")
         from app.services import sysparam_service
-        ctx = rule_engine.build_context(db, doc)
-        findings = rule_engine.run_all(ctx)
-        overall = rule_engine.compute_overall_level(
+        ctx = build_context(db, doc)
+        findings = run_all(ctx)
+        overall = compute_overall_level(
             findings,
             medium_bump=sysparam_service.get_int(db, "risk.medium_bump_count", 3),
             low_bump=sysparam_service.get_int(db, "risk.low_bump_count", 5),
@@ -243,10 +293,9 @@ def _visible_task(db: Session, user: User, task_id: int) -> AnalysisTask:
 
 
 def get_findings(db: Session, user: User, task_id: int) -> list[dict]:
-    from app.models.analysis import RiskFinding
+    from app.repositories.analysis_repo import AnalysisRepository
     _visible_task(db, user, task_id)
-    rows = db.scalars(select(RiskFinding).where(
-        RiskFinding.task_id == task_id)).all()
+    rows = AnalysisRepository(db).findings(task_id)
     return [{
         "id": f.id, "risk_type": f.risk_type, "risk_level": f.risk_level,
         "risk_title": f.risk_title, "description": f.description,
@@ -257,12 +306,13 @@ def get_findings(db: Session, user: User, task_id: int) -> list[dict]:
 
 
 def get_report(db: Session, user: User, task_id: int) -> dict:
-    from app.models.analysis import ManualReview, ReviewReport
+    from app.repositories.analysis_repo import AnalysisRepository
     task = _visible_task(db, user, task_id)
-    report = db.scalar(select(ReviewReport).where(ReviewReport.task_id == task_id))
+    repo = AnalysisRepository(db)
+    report = repo.report(task_id)
     if report is None:
         raise HTTPException(404, "报告尚未生成（任务可能仍在执行）")
-    reviews = db.scalars(select(ManualReview).where(ManualReview.report_id == report.id)).all()
+    reviews = repo.manual_reviews(report.id)
     return {
         "report_id": report.id,
         "task_id": report.task_id,

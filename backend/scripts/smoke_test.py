@@ -140,5 +140,43 @@ check("普通用户访问管理端被拒(403)", client.get("/api/v1/admin/users"
 # 恢复参数
 client.patch("/api/v1/admin/sys-params/risk.medium_bump_count", headers=ha, json={"param_value": "3"})
 
+# 17. P0-1 明细 API 契约 / P0-2 type_fields / P1-7 workflow 校验 / P0-7 角色SQL / P0-8 审计
+ndoc = client.post("/api/v1/documents", headers=h, json={
+    "document_type": "company_payment", "applicant_department": "测试部", "budget_department": "测试部",
+    "payee_name": "某公司", "payee_account": "A", "expense_category": "服务费",
+    "total_amount": "1000", "currency": "CNY", "apply_date": "2026-08-16",
+    "type_fields": {"supplier_name": "测试供应商", "contract_no": "C-X",
+                    "payment_ratio": 50, "planned_payment_date": "2026-09-01"},
+}).json()
+ndoc_id = ndoc["id"]
+for nm in ["住宿", "餐饮"]:
+    client.post(f"/api/v1/documents/{ndoc_id}/line-items", headers=h,
+                json={"item_type": "expense", "item_name": nm, "amount": "100"}).json()
+items0 = client.get(f"/api/v1/documents/{ndoc_id}", headers=h).json()["line_items"]
+check("新增明细为 2 条", len(items0) == 2)
+client.patch(f"/api/v1/documents/{ndoc_id}/line-items/{items0[0]['id']}", headers=h, json={"amount": "200"})
+client.delete(f"/api/v1/documents/{ndoc_id}/line-items/{items0[1]['id']}", headers=h)
+items1 = client.get(f"/api/v1/documents/{ndoc_id}", headers=h).json()["line_items"]
+check("删除后明细为 1 条且已更新", len(items1) == 1 and str(items1[0]["amount"]) == "200.00")
+tf = client.get(f"/api/v1/documents/{ndoc_id}", headers=h).json()["document"]["type_fields"]
+check("type_fields 双向正确", (tf or {}).get("supplier_name") == "测试供应商", str(tf))
+
+wv = client.post("/api/v1/approval-workflows", headers=ha, json={
+    "workflow_name": "空流程", "document_type": "expense",
+    "match_conditions": {"amount_min": 0}, "nodes": []}).status_code
+check("空节点流程被拒(400)", wv == 400, f"-> {wv}")
+wv2 = client.post("/api/v1/approval-workflows", headers=ha, json={
+    "workflow_name": "非法角色", "document_type": "expense",
+    "match_conditions": {"amount_min": 0},
+    "nodes": [{"node_name": "x", "approver_role": "bogus", "node_order": 1}]}).status_code
+check("非法审批角色被拒(400)", wv2 == 400, f"-> {wv2}")
+
+rp = client.patch("/api/v1/admin/roles/1/permissions", headers=ha,
+                  json={"permission_codes": ["document:view"]}).status_code
+check("角色权限更新 SQL 正常", rp == 200, f"-> {rp}")
+client.patch("/api/v1/admin/sys-params/attachment.max_size_mb", headers=ha, json={"param_value": "10"})
+aud = client.get("/api/v1/audit-logs", headers=ha).json()
+check("sys param 更新写审计日志", any(a["action_type"] == "sys_param:update" for a in aud))
+
 print("\n==== 结果:", len(OK), "PASS /", len(FAIL), "FAIL ====")
 sys.exit(1 if FAIL else 0)

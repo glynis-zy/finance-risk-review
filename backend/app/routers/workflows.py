@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """审批流程配置路由：流程 + 节点 CRUD（管理员）。"""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db
 from app.core.perms import require_perm
-from app.models.user import User
+from app.models.document import DOCUMENT_TYPES
+from app.models.user import Role, User, UserRole
 from app.models.workflow import ApprovalWorkflow, ApprovalWorkflowNode
 from app.services import audit_service
 
@@ -23,8 +24,37 @@ class NodeIn(BaseModel):
 class WorkflowIn(BaseModel):
     workflow_name: str
     document_type: str
-    match_conditions: dict = {}
-    nodes: list[NodeIn] = []
+    match_conditions: dict = Field(default_factory=dict)
+    nodes: list[NodeIn] = Field(default_factory=list)
+
+
+VALID_APPROVER_ROLES = {"approver", "finance", "admin"}
+
+
+def _validate_workflow(db: Session, payload: WorkflowIn) -> None:
+    """P1-7：流程配置基础校验——避免创建永远没人能处理的审批任务。"""
+    if payload.document_type not in DOCUMENT_TYPES:
+        raise HTTPException(400, f"非法单据类型: {payload.document_type}")
+    if not payload.nodes:
+        raise HTTPException(400, "流程至少需要一个审批节点")
+    orders = [n.node_order for n in payload.nodes]
+    if len(orders) != len(set(orders)):
+        raise HTTPException(400, "节点顺序 node_order 必须唯一")
+    cond = payload.match_conditions or {}
+    if cond.get("amount_max") is not None and cond.get("amount_min", 0) > cond["amount_max"]:
+        raise HTTPException(400, "amount_min 不能大于 amount_max")
+    for n in payload.nodes:
+        if n.approver_role not in VALID_APPROVER_ROLES:
+            raise HTTPException(400, f"非法审批角色: {n.approver_role}")
+        user = db.scalar(
+            select(User)
+            .join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(Role.role_code == n.approver_role, User.status == "active")
+            .limit(1)
+        )
+        if user is None:
+            raise HTTPException(400, f"角色 {n.approver_role} 下没有可用用户，无法创建审批任务")
 
 
 def _to_dict(wf: ApprovalWorkflow, nodes: list[ApprovalWorkflowNode]) -> dict:
@@ -57,6 +87,7 @@ def create_workflow(
     user: User = Depends(require_perm("workflow:manage")),
     db: Session = Depends(get_db),
 ):
+    _validate_workflow(db, payload)
     wf = ApprovalWorkflow(
         workflow_name=payload.workflow_name,
         document_type=payload.document_type,
@@ -82,6 +113,7 @@ def update_workflow(
     user: User = Depends(require_perm("workflow:manage")),
     db: Session = Depends(get_db),
 ):
+    _validate_workflow(db, payload)
     wf = db.get(ApprovalWorkflow, workflow_id)
     if wf is None:
         raise HTTPException(404, "流程不存在")

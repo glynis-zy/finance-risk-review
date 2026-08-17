@@ -25,12 +25,22 @@ finance-risk-review/
 │   ├── function-map.md    # 函数级地图（背诵材料）
 │   └── DEVLOG.md          # 开发记录
 ├── backend/
-│   ├── app/               # FastAPI 应用（core/db/models/schemas/routers/services/document_schemas）
+│   ├── app/
+│   │   ├── routers/       # HTTP 控制器（薄）
+│   │   ├── services/      # UseCase 编排
+│   │   ├── repositories/  # 数据访问聚合（5 个）
+│   │   ├── domain/        # 状态机 / 访问策略 / 风险引擎
+│   │   ├── clients/       # OCR(baidu) / LLM(deepseek) 适配器
+│   │   ├── core/          # config/security/perms/scopes/deps
+│   │   ├── db/            # session/init
+│   │   ├── models/        # SQLAlchemy ORM
+│   │   ├── schemas/       # Pydantic DTO
+│   │   └── document_schemas/  # 单据类型元数据
 │   ├── demo/preset_parse/ # 附件预制解析结果（demo 链路确定性）
 │   ├── data/uploads/      # 上传附件存储
 │   ├── scripts/           # init_db / seed / smoke_test / verify
 │   └── requirements.txt
-├── frontend/              # 原生单页（index.html + css + js）
+├── frontend/              # 原生单页（index.html + css + js/ui.js/app.js）
 └── demo/                  # （预留）
 ```
 

@@ -82,7 +82,8 @@ def validate_type_fields(document_type: str, values: dict) -> tuple[dict, list[s
             if field["type"] == "string":
                 cleaned[key] = str(raw)
             elif field["type"] in ("number", "percent"):
-                cleaned[key] = _to_decimal(raw, label, errors)
+                # JSON 列不能存 Decimal，转 float（规则侧用 Decimal(str(v)) 读取）
+                cleaned[key] = float(_to_decimal(raw, label, errors))
             elif field["type"] == "date":
                 cleaned[key] = _to_date(raw, label, errors)
         except Exception:
@@ -93,11 +94,13 @@ def validate_type_fields(document_type: str, values: dict) -> tuple[dict, list[s
         if field["type"] == "percent" and field["key"] in cleaned:
             if cleaned[field["key"]] > 100:
                 errors.append(f"{field['label']} 应在 0~100")
-    # P1-6：差旅开始日期不得晚于结束日期
-    if document_type == "travel" and isinstance(cleaned.get("travel_start"), date) \
-            and isinstance(cleaned.get("travel_end"), date):
-        if cleaned["travel_start"] > cleaned["travel_end"]:
-            errors.append("出差开始日期不能晚于结束日期")
+    # P1-6：差旅开始日期不得晚于结束日期（ISO 字符串比较）
+    if document_type == "travel" and cleaned.get("travel_start") and cleaned.get("travel_end"):
+        try:
+            if date.fromisoformat(cleaned["travel_start"]) > date.fromisoformat(cleaned["travel_end"]):
+                errors.append("出差开始日期不能晚于结束日期")
+        except ValueError:
+            pass
     return cleaned, errors
 
 
@@ -112,11 +115,12 @@ def _to_decimal(raw, label: str, errors: list[str]) -> Decimal:
     return d
 
 
-def _to_date(raw, label: str, errors: list[str]) -> date | str:
+def _to_date(raw, label: str, errors: list[str]) -> str:
+    """日期转 ISO 字符串（JSON 列不能存 date 对象）。"""
     if isinstance(raw, date):
-        return raw
+        return raw.isoformat()
     try:
-        return date.fromisoformat(str(raw)[:10])
+        return date.fromisoformat(str(raw)[:10]).isoformat()
     except ValueError:
         errors.append(f"{label} 日期格式应为 YYYY-MM-DD")
         return str(raw)

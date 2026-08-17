@@ -1,23 +1,20 @@
 # -*- coding: utf-8 -*-
-"""OCR 适配层（百度云，纯真实 API）。
+"""百度云 OCR 实现（纯真实 API，模块级函数，接口见 base.OcrClient）。
 
-- 无可靠置信度时 confidence 如实返回 None（P2-4），不伪造数值；
-- access token 失效（401 / error_code 110/111）自动清空重取一次（P2-5）。
+- 无可靠置信度时 confidence 如实返回 None（不伪造数值）；
+- access token 失效（401 / error_code 110/111）自动清空重取一次。
 """
 import base64
 import logging
 
 import httpx
 
+from app.clients.ocr.base import ParseFailure
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _access_token: str | None = None
-
-
-class ParseFailure(Exception):
-    """解析失败（无 API 配置、调用失败）。"""
 
 
 async def _get_access_token() -> str:
@@ -43,7 +40,7 @@ def _b64(data: bytes) -> str:
 
 
 async def _post_ocr(url: str, data: dict) -> dict:
-    """带 token 刷新重试的 OCR POST（P2-5：token 失效后自动重取一次）。"""
+    """带 token 刷新重试的 OCR POST（token 失效后自动重取一次）。"""
     global _access_token
     for attempt in range(2):
         token = await _get_access_token()
@@ -94,7 +91,7 @@ async def ocr_invoice(file_bytes: bytes) -> dict:
         "tax_amount": tax_amt,
         "amount_excluding_tax": (amount_inc - tax_amt)
             if amount_inc is not None and tax_amt is not None else None,
-        "confidence": None,  # P2-4：无可靠置信度，如实为空
+        "confidence": None,  # 无可靠置信度，如实为空
     }
 
 
@@ -112,5 +109,5 @@ async def ocr_generic(file_bytes: bytes) -> dict:
     return {
         "full_text": "\n".join(lines),
         "positions": positions,
-        "confidence": None,  # P2-4：百度通用识别未提供可靠置信度，如实为空
+        "confidence": None,
     }

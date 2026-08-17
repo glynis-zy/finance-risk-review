@@ -73,7 +73,8 @@ class LineItemOut(BaseModel):
 
 
 class DocumentOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    """DTO：API 侧叫 `type_fields`，DB 列叫 `type_fields_json`（P0-2，双向正确）。"""
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     document_type: str
@@ -90,7 +91,11 @@ class DocumentOut(BaseModel):
     reason_text: str
     document_status: str
     current_version: int
-    type_fields: dict[str, Any] = {}
+    type_fields: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias="type_fields_json",   # 读 ORM 的 type_fields_json
+        serialization_alias="type_fields",     # 序列化回 type_fields
+    )
 
 
 class AmountComparisonOut(BaseModel):

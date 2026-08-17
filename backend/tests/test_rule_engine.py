@@ -10,7 +10,7 @@ from app.models.attachment import DocumentAttachment, InvoiceRecord
 from app.models.document import DocumentLineItem, FinancialDocument
 from app.models.reference import ExpenseStandard, MarketPriceReference, SupplierProfile
 from app.models.user import Role, User, UserRole
-from app.services import rule_engine
+from app.domain import risk_engine as rule_engine
 from app.services.sysparam_service import get_int
 
 

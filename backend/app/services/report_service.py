@@ -15,8 +15,9 @@ from app.document_schemas import TYPE_LABELS
 from app.models.analysis import ManualReview, ReviewReport
 from app.models.attachment import AttachmentParseResult, DocumentAttachment, InvoiceRecord
 from app.models.document import DocumentLineItem
+from app.clients import llm as llm_client
 from app.models.user import User
-from app.services import audit_service, llm_client
+from app.services import audit_service
 
 
 def _amounts(db: Session, doc) -> dict:
