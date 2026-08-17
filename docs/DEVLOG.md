@@ -227,6 +227,47 @@
 
 ---
 
+## 第四轮：审批体系 + 状态一致性 + 权限体验 + 公共业务收口
+
+### P0
+- **P0-1 审批人 Resolver**：`resolve_approver(db, document, node)`——候选=持有 node.approver_role AND approval:process 的 active 用户，**排除申请人**（禁止自审）；按待办数 ASC → user.id ASC 确定性选择；无合法审批人抛 409（不再产生 approver_id=None 的 pending 任务）。workflow 配置校验同步要求"角色下必须有 approval:process 用户"。
+- **P0-2 finance/approver 职责统一**：正式审批节点一律 `approver` 角色；财务专业复核走 `analysis:review`/`ManualReview`。seed 流程去掉"财务复核→finance"节点；支持**多角色用户**（liuxi = finance+approver，财务负责人）。
+- **P0-3 Workflow priority**：`approval_workflows.priority`；匹配 = 类型+金额+部门 → priority DESC → id ASC。seed 加"大额对公付款审批"（≥50000, priority 10）。
+- **P0-4 状态机合法性**：`document_state.TRANSITIONS` 表，`transition()` 校验非法迁移（draft→approved 等）→ 409。
+- **P0-5 分析取消**：`cancel_for_document`（void/withdraw 取消未完成分析）+ `_is_aborted` 合作式检查（入口 + 各阶段 + 报告前），取消后不生成报告。
+- **P0-6 审核记录导出**：recordsView 改 `dlExport`（fetch+JWT）；删除 `exportUrl`/`attUrl`。
+
+### P1
+- **P1-7 ManualReview 语义**：枚举改 `confirmed/needs_material/escalated`，**不改变 document_status**（正式审批只走 ApprovalTask）；前端复核表单文案去"通过/驳回"措辞。
+- **P1-8 parse 权限**：`POST .../parse` 改 `require_perm("analysis:create")` + L2 可见。
+- **P1-9 附件**：magic bytes（PDF/PNG/JPEG）扩展名校验；`document_category` 可选（用户指定 > 文件名识别 > other）；类别枚举标准化 `invoice/contract/itinerary/payment_basis/other`（原 payment_doc 更名）；前端上传区加类别选择。
+- **P1-10 规则 config 校验**：已知字段类型/范围错误保存时 400（tolerance_pct/ratio_gap/exceed_pct/deviation_pct ≥0，history_spike_ratio >0）。
+- **P1-11 前端权限菜单**：按 permission_codes 显隐菜单；风险页 `analysis:review` 才显示确认/排除与复核表单。
+- **P1-12 复制**：copy 复制 line_items（不复制附件/版本/审批/分析/报告），新单 draft、current_version=0。
+- **P1-13 金额统一**：`services/amount_service.py::calculate_amount_comparison` 唯一实现；`compare_amounts` 与 `report_service` 复用。
+
+### P2
+- **Risk Engine 拆分**：`models.py`（Finding/LEVEL_SCORE）、`context.py`（RuleContext/build_context/load_configs/DEFAULT_CONFIGS）；engine.py 保留 run_all/compute/10 条规则；`rules/*.py` 子拆解记为规划项。
+- **app.js views 子拆解**：记为规划项（本轮未做，避免扩大改动面）。
+
+### 验证
+- pytest **52/52**；smoke_test **48/48**（SQLite 与 MySQL 双跑）。
+- 新增 `tests/test_round4.py`（11 条）：Resolver 自审/无权限/负载均衡/稳定、priority、状态机非法迁移、取消不生成报告、复制明细、金额统一、ManualReview 不改状态。
+- 冒烟新增：finance-only 不能审批、finance+approver 有审批权、parse 权限、magic bytes、category 指定、非法 config。
+- 说明：seed 中所有角色都有 `analysis:create`，parse 权限的拒绝面由 L2 覆盖（冒烟改用 L2 拒测）。
+
+### 仍刻意不做（第四轮）
+- `rules/*.py` 十条规则按文件拆分、前端 `views/*.js` 拆包、Repository 100% 覆盖（无意义大改）。
+- 完整组织架构/部门树/代理审批/会签、finance_manager 等新 RBAC 角色（用 position_level 表达真实职级）。
+
+### 收尾：MySQL 可复现 + 五类单据 E2E
+- 新增 `docker-compose.yml`（MySQL 8 测试库，atguigu/Atguigu.123，可复现）。
+- **判断：不写 Dockerfile**——交付为"代码+截图"，容器化非刚需；当前部署口径=本地 uvicorn + 可选 compose 起 MySQL（见上）。
+- 新增 `scripts/e2e.py`：五类单据完整 E2E（create→明细→附件→提交→解析→分析→报告→导出→多节点审批），解析走预制、动态找审批人。MySQL 上 **20/20 PASS**。
+- 清单状态：DATABASE_URL→MySQL 全链路 ✅（smoke 48/48 + e2e 20/20）；DeepSeek key 已配置、**百度 OCR key 待用户提供**（auto/real 真实 OCR 需 key）；preset 占位 PNG 待真实样例替换。
+
+---
+
 ## 第三轮：缺陷修复 + 分层重构（收口）
 
 ### 17:30 - P0 缺陷

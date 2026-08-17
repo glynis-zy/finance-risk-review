@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""状态机测试：版本语义（P0-3）、void 终态（P0-2）、退回重提交。"""
+"""状态机测试：版本语义、void 终态、审批守卫、审批意见。
+
+P0-1 后申请人不能审批自己，因此测试用两个不同用户：applicant（申请人）+ approver（审批人）。
+"""
 from datetime import date
 from decimal import Decimal
 
@@ -9,15 +12,28 @@ from fastapi import HTTPException
 from app.models.analysis import AnalysisTask
 from app.models.attachment import DocumentAttachment
 from app.models.document import DocumentVersion, FinancialDocument
-from app.models.user import Role, User, UserRole
+from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.models.workflow import ApprovalInstance, ApprovalWorkflow, ApprovalWorkflowNode, ApprovalTask
 from app.services import document_service, workflow_service
 
 
-def _approver(db):
+def _applicant(db) -> User:
+    u = User(username="u_applicant", display_name="测试申请人", password_hash="x")
+    db.add(u)
+    db.flush()
+    return u
+
+
+def _approver(db) -> User:
+    """审批人：approver 角色 + approval:process 权限（resolve_approver 要求）。"""
     role = Role(role_code="approver", role_name="审批人员")
     db.add(role)
     db.flush()
+    perm = Permission(permission_code="approval:process", permission_name="处理审批",
+                      resource_type="approval", action_type="process")
+    db.add(perm)
+    db.flush()
+    db.add(RolePermission(role_id=role.id, permission_id=perm.id))
     u = User(username="u_approver", display_name="测试审批", password_hash="x")
     db.add(u)
     db.flush()
@@ -34,9 +50,9 @@ def _expense_workflow(db):
                                 approver_role="approver", node_order=1))
 
 
-def _doc(db, user, doc_no, status, current_version) -> FinancialDocument:
+def _doc(db, applicant, doc_no, status, current_version) -> FinancialDocument:
     doc = FinancialDocument(
-        document_type="expense", document_no=doc_no, applicant_id=user.id,
+        document_type="expense", document_no=doc_no, applicant_id=applicant.id,
         applicant_department="市场部", budget_department="市场部", payee_name="某公司",
         payee_account="A", expense_category="差旅", total_amount=Decimal("1000"),
         currency="CNY", apply_date=date(2026, 8, 1), document_status=status,
@@ -56,11 +72,12 @@ def _doc(db, user, doc_no, status, current_version) -> FinancialDocument:
 def test_first_submit_all_versions_are_1(db, monkeypatch):
     """P0-3：首次提交 snapshot.version_no == current_version == instance.document_version == 附件版本 == 1。"""
     monkeypatch.setattr("app.services.analysis_service.enqueue", lambda task_id: None)
-    user = _approver(db)
+    applicant = _applicant(db)
+    _approver(db)
     _expense_workflow(db)
 
-    doc = _doc(db, user, "EX-TEST-001", "draft", 0)  # draft 未提交过
-    document_service.submit(db, user, doc.id)
+    doc = _doc(db, applicant, "EX-TEST-001", "draft", 0)  # draft 未提交过
+    document_service.submit(db, applicant, doc.id)
 
     assert doc.document_status == "pending_review"
     assert doc.current_version == 1
@@ -76,11 +93,12 @@ def test_first_submit_all_versions_are_1(db, monkeypatch):
 def test_returned_resubmit_all_versions_are_2(db, monkeypatch):
     """P0-3：draft→submit(v1)→退回→补新附件→重提交(v2)；版本记录区分、新附件绑 v2、旧附件留 v1。"""
     monkeypatch.setattr("app.services.analysis_service.enqueue", lambda task_id: None)
-    user = _approver(db)
+    applicant = _applicant(db)
+    _approver(db)
     _expense_workflow(db)
 
-    doc = _doc(db, user, "EX-TEST-002", "draft", 0)
-    document_service.submit(db, user, doc.id)           # v1
+    doc = _doc(db, applicant, "EX-TEST-002", "draft", 0)
+    document_service.submit(db, applicant, doc.id)      # v1
 
     doc.document_status = "returned"                    # 模拟审批退回
     # 退回修改期间新增附件（暂存 document_version=0，待 v2 绑定）
@@ -89,7 +107,7 @@ def test_returned_resubmit_all_versions_are_2(db, monkeypatch):
                               storage_status="stored", parse_status="pending"))
     db.commit()
 
-    document_service.submit(db, user, doc.id)           # v2
+    document_service.submit(db, applicant, doc.id)      # v2
 
     assert doc.current_version == 2
     snaps = db.query(DocumentVersion).filter(DocumentVersion.document_id == doc.id).all()
@@ -104,23 +122,24 @@ def test_returned_resubmit_all_versions_are_2(db, monkeypatch):
 def test_void_blocks_old_approval_task(db, monkeypatch):
     """P0-2：提交 → 作废 → 旧 task approve 必须 409，document 仍 voided。"""
     monkeypatch.setattr("app.services.analysis_service.enqueue", lambda task_id: None)
-    user = _approver(db)
+    applicant = _applicant(db)
+    approver = _approver(db)
     _expense_workflow(db)
 
-    doc = _doc(db, user, "EX-TEST-003", "draft", 0)
-    document_service.submit(db, user, doc.id)
+    doc = _doc(db, applicant, "EX-TEST-003", "draft", 0)
+    document_service.submit(db, applicant, doc.id)
     task = db.query(ApprovalTask).filter(ApprovalTask.instance_id.in_(
         db.query(ApprovalInstance.id).filter(ApprovalInstance.document_id == doc.id)
     )).first()
 
-    document_service.void(db, user, doc.id)
+    document_service.void(db, applicant, doc.id)
     assert doc.document_status == "voided"
     inst = db.query(ApprovalInstance).filter(ApprovalInstance.document_id == doc.id).first()
     assert inst.instance_status == "cancelled"           # 审批实例被取消
     assert db.get(ApprovalTask, task.id).task_status == "cancelled"
 
     with pytest.raises(HTTPException) as ei:
-        workflow_service.approve(db, user, task.id)
+        workflow_service.approve(db, approver, task.id)
     assert ei.value.status_code == 409
     db.refresh(doc)
     assert doc.document_status == "voided"               # 终态不可被旧任务迁移
@@ -129,18 +148,19 @@ def test_void_blocks_old_approval_task(db, monkeypatch):
 def test_review_comment_and_status_log(db, monkeypatch):
     """P1-3：审批意见落库；状态日志 operator_id 记真实审批人。"""
     monkeypatch.setattr("app.services.analysis_service.enqueue", lambda task_id: None)
-    user = _approver(db)
+    applicant = _applicant(db)
+    approver = _approver(db)
     _expense_workflow(db)
 
-    doc = _doc(db, user, "EX-TEST-004", "draft", 0)
-    document_service.submit(db, user, doc.id)
+    doc = _doc(db, applicant, "EX-TEST-004", "draft", 0)
+    document_service.submit(db, applicant, doc.id)
     task = db.query(ApprovalTask).filter(ApprovalTask.instance_id.in_(
         db.query(ApprovalInstance.id).filter(ApprovalInstance.document_id == doc.id)
     )).first()
 
-    workflow_service.approve(db, user, task.id, "金额核实无误，同意")
+    workflow_service.approve(db, approver, task.id, "金额核实无误，同意")
     assert db.get(ApprovalTask, task.id).review_comment == "金额核实无误，同意"
 
     from app.models.document import DocumentStatusLog
     logs = db.query(DocumentStatusLog).filter(DocumentStatusLog.document_id == doc.id).all()
-    assert any(l.to_status == "approved" and l.operator_id == user.id for l in logs)   # 真实审批人
+    assert any(l.to_status == "approved" and l.operator_id == approver.id for l in logs)   # 真实审批人

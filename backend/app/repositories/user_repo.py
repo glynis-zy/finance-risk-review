@@ -41,3 +41,22 @@ class UserRepository:
             .where(Role.role_code == role_code, User.status == "active")
             .limit(1)
         ).first()
+
+    def users_with_role_and_perm(self, role_code: str, permission_code: str,
+                                 exclude_user_id: int | None = None) -> list[User]:
+        """持有指定角色 AND 拥有指定权限的启用用户（审批人 Resolver 候选集）。"""
+        stmt = (
+            select(User)
+            .join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .join(RolePermission, RolePermission.role_id == Role.id)
+            .join(Permission, Permission.id == RolePermission.permission_id)
+            .where(
+                Role.role_code == role_code,
+                Permission.permission_code == permission_code,
+                User.status == "active",
+            )
+        )
+        if exclude_user_id is not None:
+            stmt = stmt.where(User.id != exclude_user_id)
+        return list(self.db.scalars(stmt).all())

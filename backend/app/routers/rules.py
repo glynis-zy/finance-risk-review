@@ -13,6 +13,30 @@ from app.services import audit_service
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 
+# P1-10：已知配置字段的轻量确定性校验（未知字段允许保留，已知字段类型错误必须 400）
+_KNOWN_CONFIG_FIELDS: dict[str, dict[str, str]] = {
+    "invoice_amount_consistency": {"tolerance_pct": "ge0"},
+    "line_items_total": {"tolerance_pct": "ge0"},
+    "contract_payment_consistency": {"tolerance_pct": "ge0", "ratio_gap": "ge0"},
+    "expense_policy_compliance": {"exceed_pct": "ge0"},
+    "price_reasonableness": {"deviation_pct": "ge0"},
+    "spend_anomaly": {"history_spike_ratio": "gt0"},
+}
+
+
+def validate_rule_config(rule_code: str, config: dict) -> None:
+    known = _KNOWN_CONFIG_FIELDS.get(rule_code, {})
+    for field, constraint in known.items():
+        if field not in config:
+            continue
+        val = config[field]
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise HTTPException(400, f"规则 {rule_code} 的 {field} 必须是数字")
+        if constraint == "ge0" and val < 0:
+            raise HTTPException(400, f"规则 {rule_code} 的 {field} 必须 >= 0")
+        if constraint == "gt0" and val <= 0:
+            raise HTTPException(400, f"规则 {rule_code} 的 {field} 必须 > 0")
+
 
 class RuleIn(BaseModel):
     rule_code: str
@@ -43,6 +67,7 @@ def create_rule(
 ):
     if db.scalar(select(RiskRule).where(RiskRule.rule_code == payload.rule_code)):
         raise HTTPException(409, f"规则 {payload.rule_code} 已存在")
+    validate_rule_config(payload.rule_code, payload.config)
     rule = RiskRule(
         rule_code=payload.rule_code, rule_name=payload.rule_name,
         applies_to_json=payload.applies_to, enabled=payload.enabled,
@@ -65,6 +90,7 @@ def update_rule(
     rule = db.get(RiskRule, rule_id)
     if rule is None:
         raise HTTPException(404, "规则不存在")
+    validate_rule_config(payload.rule_code, payload.config)
     rule.rule_name = payload.rule_name
     rule.applies_to_json = payload.applies_to
     rule.enabled = payload.enabled

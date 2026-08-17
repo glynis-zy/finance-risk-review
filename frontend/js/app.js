@@ -69,14 +69,19 @@ window.doLogout = doLogout;
 /* ---------- 布局 ---------- */
 function layoutHTML(active) {
   const u = API.user || {};
-  const perms = u.permission_codes || [];
-  const isAdmin = perms.some(p => ['user:manage', 'role:manage', 'system:manage'].includes(p));
-  const menu = [
-    ['dashboard', '审核工作台'], ['documents', '单据管理'], ['document-new', '新建单据'],
-    ['chat', '智能审核对话'], ['approvals', '审批待办'], ['rules', '规则配置'],
-    ['workflows', '流程配置'], ['records', '审核记录'],
-  ];
-  if (isAdmin) menu.push(['admin', '系统管理']);
+  const perms = new Set(u.permission_codes || []);
+  // P1-11：菜单按 permission_codes 显示（后端 require_perm 仍是最终边界，前端只做 UX）
+  const menu = [['dashboard', '审核工作台']];
+  if (perms.has('document:view')) menu.push(['documents', '单据管理']);
+  if (perms.has('document:create')) menu.push(['document-new', '新建单据']);
+  if (perms.has('session:chat')) menu.push(['chat', '智能审核对话']);
+  if (perms.has('approval:view')) menu.push(['approvals', '审批待办']);
+  if (perms.has('rule:view')) menu.push(['rules', '规则配置']);
+  if (perms.has('workflow:view')) menu.push(['workflows', '流程配置']);
+  if (perms.has('analysis:view')) menu.push(['records', '审核记录']);
+  if (perms.has('user:manage') || perms.has('role:manage') || perms.has('system:manage')) {
+    menu.push(['admin', '系统管理']);
+  }
   const links = menu.map(([r, t]) =>
     `<a data-route="${r}" href="#/${r}">${t}</a>`).join('');
   return `<div class="layout">
@@ -204,6 +209,14 @@ async function docEditView(el, id) {
       <div id="att-list"></div>
       <div class="toolbar mt">
         <input type="file" id="att-file">
+        <select id="att-cat">
+          <option value="">自动识别</option>
+          <option value="invoice">发票</option>
+          <option value="contract">合同</option>
+          <option value="itinerary">行程单</option>
+          <option value="payment_basis">付款依据</option>
+          <option value="other">其他</option>
+        </select>
         <button class="btn sm" onclick="uploadAtt()">上传附件</button>
       </div>
       <div class="toolbar mt"><button class="btn" onclick="saveDoc(${doc ? doc.id : 'null'})">保存</button>
@@ -250,7 +263,8 @@ async function docEditView(el, id) {
   window.uploadAtt = async () => {
     const f = document.getElementById('att-file').files[0];
     if (!f) return;
-    try { await API.uploadAtt(doc.id, f); renderAtt(); } catch (e) { alert(e.message); }
+    const cat = document.getElementById('att-cat').value;
+    try { await API.uploadAtt(doc.id, f, cat); renderAtt(); } catch (e) { alert(e.message); }
   };
 
   window.saveDoc = async (did, submit) => {
@@ -426,29 +440,38 @@ async function reAnalyze(docId) {
 window.reAnalyze = reAnalyze;
 
 function riskHTML(rep, findings) {
+  // P1-11：风险项"确认/排除"与财务复核表单仅对 analysis:review 显示
+  const canReview = (API.user?.permission_codes || []).includes('analysis:review');
+  const reviewTh = canReview ? '<th>复核</th>' : '';
+  const reviewCell = (f) => canReview
+    ? `<td><select data-fid="${f.id}"><option ${f.review_status === 'pending' ? 'selected' : ''} value="pending">待复核</option>
+      <option ${f.review_status === 'confirmed' ? 'selected' : ''} value="confirmed">确认</option>
+      <option ${f.review_status === 'dismissed' ? 'selected' : ''} value="dismissed">排除</option></select></td>` : '';
+  const colspan = canReview ? 8 : 7;
+  const reviewForm = canReview ? `
+    <div class="card mt"><h3>财务风险复核</h3>
+      <div class="msg info">风险复核结论不改变单据状态；正式通过/退回/驳回走审批流程。</div>
+      <div class="grid">
+        <div class="field"><label>复核结论</label><select id="rev-result">
+          <option value="confirmed">风险确认</option><option value="needs_material">需补充材料</option>
+          <option value="escalated">升级处理</option></select></div>
+        <div class="field"><label>复核意见</label><input id="rev-comment" placeholder="填写复核意见"></div>
+      </div>
+      <button class="btn sm" onclick="submitReview(${rep.report_id})">提交复核</button></div>` : '';
   return `<h3>整体风险：${badge(rep.overall_risk_level)}　建议：${esc(rep.recommendation)}</h3>
     <div class="msg info mt">${esc((rep.risk_summary || {}).count || 0)} 项风险（高 ${(rep.risk_summary || {}).high || 0} / 中 ${(rep.risk_summary || {}).medium || 0} / 低 ${(rep.risk_summary || {}).low || 0}）</div>
-    <table><thead><tr><th>等级</th><th>风险项</th><th>描述</th><th>实际值</th><th>参考值</th><th>阈值</th><th>建议</th><th>复核</th></tr></thead>
+    <table><thead><tr><th>等级</th><th>风险项</th><th>描述</th><th>实际值</th><th>参考值</th><th>阈值</th><th>建议</th>${reviewTh}</tr></thead>
     <tbody>${findings.map(f => `
       <tr><td>${badge(f.risk_level)}</td><td>${esc(f.risk_title)}</td><td>${esc(f.description)}</td>
       <td class="mono">${esc(JSON.stringify(f.actual || {}))}</td><td class="mono">${esc(JSON.stringify(f.reference || {}))}</td>
       <td class="mono">${esc(JSON.stringify(f.threshold || {}))}</td><td>${esc(f.suggestion || '')}</td>
-      <td><select data-fid="${f.id}"><option ${f.review_status === 'pending' ? 'selected' : ''} value="pending">待复核</option>
-      <option ${f.review_status === 'confirmed' ? 'selected' : ''} value="confirmed">确认</option>
-      <option ${f.review_status === 'dismissed' ? 'selected' : ''} value="dismissed">排除</option></select></td></tr>`).join('') || '<tr><td colspan=8>无风险项</td></tr>'}
+      ${reviewCell(f)}</tr>`).join('') || `<tr><td colspan=${colspan}>无风险项</td></tr>`}
     </tbody></table>
     <div class="toolbar mt">
       <button class="btn ghost sm" onclick="dlExport(${rep.report_id})">导出报告(HTML)</button>
       <button class="btn ok sm" onclick="reAnalyze(${rep.document_id})">重新分析</button>
     </div>
-    <div class="card mt"><h3>人工复核</h3>
-      <div class="grid">
-        <div class="field"><label>复核结论</label><select id="rev-result">
-          <option value="approved">通过</option><option value="return">退回</option>
-          <option value="reject">驳回</option><option value="manual">需人工进一步处理</option></select></div>
-        <div class="field"><label>复核意见</label><input id="rev-comment" placeholder="填写复核意见"></div>
-      </div>
-      <button class="btn sm" onclick="submitReview(${rep.report_id})">提交复核</button></div>
+    ${reviewForm}
     <details class="mt"><summary>查看报告全文</summary><pre class="mono" style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:6px">${esc(rep.report_markdown)}</pre></details>`;
 }
 function bindRiskActions(body, findings) {
@@ -617,7 +640,7 @@ async function recordsView(el) {
       <tbody>${reports.map(r => `
         <tr><td class="mono">${esc(r.document_no || '')}</td><td>${badge(r.overall_risk_level)}</td>
         <td>${esc(r.recommendation)}</td><td>${esc((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
-        <td><a class="btn ghost sm" href="${API.exportUrl(r.report_id)}" target="_blank">导出</a></td></tr>`).join('') || '<tr><td colspan=5>暂无</td></tr>'}
+        <td><button class="btn ghost sm" onclick="dlExport(${r.report_id})">导出</button></td></tr>`).join('') || '<tr><td colspan=5>暂无</td></tr>'}
       </tbody></table>
     </div>
     <div class="card"><h3>操作审计日志</h3>

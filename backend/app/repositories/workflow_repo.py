@@ -19,11 +19,15 @@ class WorkflowRepository:
 
     def match_workflow(self, document_type: str, amount: Decimal,
                        department: str) -> ApprovalWorkflow | None:
-        """按 单据类型 + 金额区间 + 部门 匹配启用流程。"""
+        """按 单据类型 + 金额区间 + 部门 匹配启用流程。
+
+        P0-3 确定性：匹配全部 active 流程 → priority DESC → id ASC → 取第一条。
+        """
         wfs = self.db.scalars(select(ApprovalWorkflow).where(
             ApprovalWorkflow.document_type == document_type,
             ApprovalWorkflow.status == "active",
         )).all()
+        matched = []
         for wf in wfs:
             cond = wf.match_conditions_json or {}
             amount_min = Decimal(str(cond.get("amount_min", "0")))
@@ -35,8 +39,10 @@ class WorkflowRepository:
             dept = cond.get("department")
             if dept and department != dept:
                 continue
-            return wf
-        return None
+            matched.append(wf)
+        if not matched:
+            return None
+        return sorted(matched, key=lambda w: (-w.priority, w.id))[0]
 
     def nodes(self, workflow_id: int) -> list[ApprovalWorkflowNode]:
         return list(self.db.scalars(select(ApprovalWorkflowNode).where(

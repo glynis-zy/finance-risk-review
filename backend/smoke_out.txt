@@ -1,0 +1,50 @@
+﻿PASS  GET /health  
+PASS  GET / 返回前端页面  
+PASS  GET /static/css/style.css  
+PASS  GET /static/js/app.js  
+PASS  申请人 zhangsan 登录  -> 200
+PASS  me 返回角色  
+PASS  zhangsan 单据列表  total=3
+PASS  数据权限过滤（只含本人单据）  got={'BP-20260816-003', 'CP-20260816-001', 'TR-20260816-005'}
+PASS  单据详情含明细/附件  attachments=2
+PASS  金额核对：发票=单据  50000.00
+PASS  分析任务1 成功  
+PASS  CP 报告整体风险=low  low
+PASS  AP 报告整体风险=high  high
+PASS  AP 含供应商黑名单风险项  
+PASS  审批人 wangwu 有待办  count=2
+PASS  审批通过接口  {'result': 'approved', 'next_node': '财务负责人审批'}
+PASS  报告导出 HTML  
+PASS  附件下载  
+PASS  供应商风险查询  
+PASS  规则列表  
+PASS  审计日志  
+PASS  越权访问被拒(403/404)  -> 403
+PASS  登出后旧令牌被拒(401)  
+PASS  其他令牌不受影响  
+PASS  张三不能读李四的分析任务状态  -> 403
+PASS  张三不能导出李四的报告  -> 403
+PASS  张三报告列表不含李四单据  ['TR-20260816-005', 'BP-20260816-003', 'CP-20260816-001']
+PASS  未分配任务的审批人不能复核报告  -> 403
+PASS  分配任务的审批人能复核报告  -> 200
+PASS  管理端用户列表  
+PASS  管理端角色列表  
+PASS  管理端系统参数  
+PASS  修改系统参数  
+PASS  普通用户访问管理端被拒(403)  
+PASS  新增明细为 2 条  
+PASS  删除后明细为 1 条且已更新  
+PASS  type_fields 双向正确  {'contract_no': 'C-X', 'payment_ratio': 50.0, 'supplier_name': '测试供应商', 'planned_payment_date': '2026-09-01'}
+PASS  空节点流程被拒(400)  -> 400
+PASS  非法审批角色被拒(400)  -> 400
+PASS  sys param 更新写审计日志  
+PASS  finance-only 不能正式审批(403)  -> 403
+PASS  finance+approver 具备审批权限  
+PASS  无数据权限不能触发解析(403)  -> 403
+PASS  有 analysis:create + 可见可解析(200)  -> 200
+PASS  伪装扩展名上传被拒(400)  -> 400
+PASS  指定 document_category 生效  {"id":8,"file_name":"随便.png","document_category":"contract","parse_status":"pend
+PASS  非法规则 config 被拒(400)  -> 400
+PASS  角色权限更新 SQL 正常  -> 200
+
+==== 结果: 48 PASS / 0 FAIL ====

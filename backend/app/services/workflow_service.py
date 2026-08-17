@@ -28,10 +28,25 @@ from app.services import audit_service
 PENDING, APPROVED, RETURNED, REJECTED = "pending", "approved", "returned", "rejected"
 
 
-def _pick_user_with_role(db: Session, role_code: str) -> User | None:
-    """找一个持有指定角色的启用用户，作为任务办理人。"""
+def resolve_approver(db: Session, document: FinancialDocument, node) -> User:
+    """确定性审批人解析（P0-1）：
+    候选 = 持有 node.approver_role AND approval:process 的 active 用户，排除申请人；
+    排序 = 待办任务数 ASC → user.id ASC；
+    无合法审批人 → 409（不允许生成 approver_id=None 的 pending 任务）。
+    """
     from app.repositories.user_repo import UserRepository
-    return UserRepository(db).active_user_with_role(role_code)
+    candidates = UserRepository(db).users_with_role_and_perm(
+        node.approver_role, "approval:process", exclude_user_id=document.applicant_id)
+    if not candidates:
+        raise HTTPException(
+            409,
+            f"角色 {node.approver_role} 下没有可用审批人（或申请人不能审批自己的单据）",
+        )
+
+    def _key(u: User) -> tuple[int, int]:
+        return (len(WorkflowRepository(db).my_pending_tasks(u.id)), u.id)
+
+    return min(candidates, key=_key)
 
 
 def start_approval(db: Session, document: FinancialDocument) -> ApprovalInstance:
@@ -55,7 +70,7 @@ def start_approval(db: Session, document: FinancialDocument) -> ApprovalInstance
 
     first = nodes[0]
     instance.current_node_id = first.id
-    _create_task(db, instance, first)
+    _create_task(db, document, instance, first)
     return instance
 
 
@@ -81,7 +96,7 @@ def approve(db: Session, user: User, task_id: int, review_comment: str = "") -> 
         # 有下一节点 → 推进
         nxt = nodes[current_idx + 1]
         instance.current_node_id = nxt.id
-        _create_task(db, instance, nxt)
+        _create_task(db, document, instance, nxt)
         audit_service.log(db, user, "approval:approve", "approval_task", str(task.id),
                           {"comment": review_comment})
         db.commit()
@@ -158,12 +173,13 @@ def _match_workflow(db: Session, document: FinancialDocument) -> ApprovalWorkflo
         document.document_type, document.total_amount, document.applicant_department)
 
 
-def _create_task(db: Session, instance: ApprovalInstance, node: ApprovalWorkflowNode) -> ApprovalTask:
-    approver = _pick_user_with_role(db, node.approver_role)
+def _create_task(db: Session, document: FinancialDocument,
+                 instance: ApprovalInstance, node: ApprovalWorkflowNode) -> ApprovalTask:
+    approver = resolve_approver(db, document, node)  # 无合法审批人直接 409
     task = ApprovalTask(
         instance_id=instance.id,
         node_id=node.id,
-        approver_id=approver.id if approver else None,
+        approver_id=approver.id,
         task_status=PENDING,
     )
     db.add(task)

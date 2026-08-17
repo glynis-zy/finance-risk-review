@@ -8,38 +8,24 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.clients import llm as llm_client
 from app.document_schemas import TYPE_LABELS
 from app.models.analysis import ManualReview, ReviewReport
-from app.models.attachment import AttachmentParseResult, DocumentAttachment, InvoiceRecord
-from app.models.document import DocumentLineItem
-from app.clients import llm as llm_client
 from app.models.user import User
-from app.services import audit_service
+from app.services import amount_service, audit_service
 
 
-def _amounts(db: Session, doc) -> dict:
-    line_total = db.scalar(
-        select(func.coalesce(func.sum(DocumentLineItem.amount), 0)).where(
-            DocumentLineItem.document_id == doc.id)) or Decimal(0)
-    invoice_total = db.scalar(
-        select(func.coalesce(func.sum(InvoiceRecord.amount_including_tax), 0))
-        .join(DocumentAttachment, DocumentAttachment.id == InvoiceRecord.attachment_id)
-        .where(DocumentAttachment.document_id == doc.id)) or Decimal(0)
-    contract = None
-    for f in db.execute(
-        select(AttachmentParseResult.fields_json)
-        .join(DocumentAttachment, DocumentAttachment.id == AttachmentParseResult.attachment_id)
-        .where(DocumentAttachment.document_id == doc.id,
-               AttachmentParseResult.document_category == "contract")
-    ).scalars().all():
-        if f and f.get("contract_amount") is not None:
-            contract = Decimal(str(f["contract_amount"]))
-            break
-    return {"line_items_total": line_total, "invoice_total": invoice_total,
-            "contract_amount": contract, "payment_amount": doc.total_amount}
+def _json_safe(value):
+    """报告/面板 JSON 序列化：Decimal → str。"""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _recommendation(overall: str, findings: list) -> str:
@@ -55,7 +41,7 @@ def _recommendation(overall: str, findings: list) -> str:
 
 def generate(db: Session, task, doc, findings: list, overall: str) -> ReviewReport:
     """汇总风险项 → 生成 markdown（LLM 润色）→ 落 review_reports。"""
-    amounts = _amounts(db, doc)
+    comp = amount_service.calculate_amount_comparison(db, doc)  # P1-13：与金额核对面板同一实现
     n_high = sum(1 for f in findings if f.risk_level == "high")
     n_med = sum(1 for f in findings if f.risk_level == "medium")
     n_low = sum(1 for f in findings if f.risk_level == "low")
@@ -82,10 +68,10 @@ def generate(db: Session, task, doc, findings: list, overall: str) -> ReviewRepo
     lines.append("| 项目 | 金额 |")
     lines.append("| --- | --- |")
     lines.append(f"| 单据总金额 | {doc.total_amount} |")
-    lines.append(f"| 明细合计 | {amounts['line_items_total']} |")
-    lines.append(f"| 发票合计 | {amounts['invoice_total']} |")
-    lines.append(f"| 合同金额 | {amounts['contract_amount'] if amounts['contract_amount'] is not None else '-'} |")
-    lines.append(f"| 付款金额 | {amounts['payment_amount']} |")
+    lines.append(f"| 明细合计 | {comp.line_items_total} |")
+    lines.append(f"| 发票合计 | {comp.invoice_total} |")
+    lines.append(f"| 合同金额 | {comp.contract_amount if comp.contract_amount is not None else '-'} |")
+    lines.append(f"| 付款金额 | {comp.payment_amount} |")
     lines.append("")
     lines.append("## 四、风险项列表")
     if not findings:
@@ -136,7 +122,7 @@ def generate(db: Session, task, doc, findings: list, overall: str) -> ReviewRepo
         document_id=doc.id,
         overall_risk_level=overall,
         risk_summary_json=summary,
-        amount_comparison_json={k: str(v) if v is not None else None for k, v in amounts.items()},
+        amount_comparison_json=_json_safe(comp.model_dump()),
         recommendation=recommendation,
         report_markdown=markdown,
     )
@@ -192,6 +178,10 @@ def _md_to_html(md: str) -> str:
 
 def submit_manual_review(db: Session, user: User, report_id: int,
                          review_result: str, comment: str) -> ManualReview:
+    """人工复核（P1-7）：只记录复核结论（confirmed/needs_material/escalated），
+    不改 document_status——正式单据状态只能由 ApprovalTask 流程决定。"""
+    if review_result not in ("confirmed", "needs_material", "escalated"):
+        raise HTTPException(400, "review_result 取值: confirmed/needs_material/escalated")
     report = db.get(ReviewReport, report_id)
     if report is None:
         raise HTTPException(404, "报告不存在")

@@ -25,6 +25,7 @@ class WorkflowIn(BaseModel):
     workflow_name: str
     document_type: str
     match_conditions: dict = Field(default_factory=dict)
+    priority: int = 0   # 匹配优先级，大者优先（P0-3）
     nodes: list[NodeIn] = Field(default_factory=list)
 
 
@@ -46,22 +47,18 @@ def _validate_workflow(db: Session, payload: WorkflowIn) -> None:
     for n in payload.nodes:
         if n.approver_role not in VALID_APPROVER_ROLES:
             raise HTTPException(400, f"非法审批角色: {n.approver_role}")
-        user = db.scalar(
-            select(User)
-            .join(UserRole, UserRole.user_id == User.id)
-            .join(Role, Role.id == UserRole.role_id)
-            .where(Role.role_code == n.approver_role, User.status == "active")
-            .limit(1)
-        )
-        if user is None:
-            raise HTTPException(400, f"角色 {n.approver_role} 下没有可用用户，无法创建审批任务")
+        # 与 resolve_approver 对齐：角色下必须有拥有 approval:process 的可用用户
+        from app.repositories.user_repo import UserRepository
+        users = UserRepository(db).users_with_role_and_perm(n.approver_role, "approval:process")
+        if not users:
+            raise HTTPException(400, f"角色 {n.approver_role} 下没有具备审批权限的用户，无法创建审批任务")
 
 
 def _to_dict(wf: ApprovalWorkflow, nodes: list[ApprovalWorkflowNode]) -> dict:
     return {
         "id": wf.id, "workflow_name": wf.workflow_name,
         "document_type": wf.document_type, "match_conditions": wf.match_conditions_json,
-        "status": wf.status,
+        "priority": wf.priority, "status": wf.status,
         "nodes": [{"id": n.id, "node_name": n.node_name,
                    "approver_role": n.approver_role, "node_order": n.node_order}
                   for n in sorted(nodes, key=lambda x: x.node_order)],
@@ -92,6 +89,7 @@ def create_workflow(
         workflow_name=payload.workflow_name,
         document_type=payload.document_type,
         match_conditions_json=payload.match_conditions,
+        priority=payload.priority,
     )
     db.add(wf)
     db.flush()
@@ -120,6 +118,7 @@ def update_workflow(
     wf.workflow_name = payload.workflow_name
     wf.document_type = payload.document_type
     wf.match_conditions_json = payload.match_conditions
+    wf.priority = payload.priority
     # 简单策略：更新时重建节点
     old_nodes = db.scalars(select(ApprovalWorkflowNode).where(
         ApprovalWorkflowNode.workflow_id == wf.id)).all()

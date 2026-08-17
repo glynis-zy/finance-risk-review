@@ -16,7 +16,7 @@ class DocumentAttachment(TimestampMixin, Base):
     document_id: Mapped[int] = mapped_column(ForeignKey("financial_documents.id"), index=True)
     # 0=暂存附件（未正式提交），提交时绑定到本次提交版本（P0-3）
     document_version: Mapped[int] = mapped_column(Integer, default=0)
-    # 附件类别（invoice/contract/itinerary/payment_doc）：上传时按文件名识别，提交时做类别校验（P1-2）
+    # 附件类别（invoice/contract/itinerary/payment_basis/other）：上传时识别/用户指定，提交时按类别校验（P1-2）
     document_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     file_name: Mapped[str] = mapped_column(String(255))
     file_type: Mapped[str] = mapped_column(String(32))      # pdf/png/jpg

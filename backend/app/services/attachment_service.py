@@ -24,13 +24,29 @@ from app.services.parse_pipeline import recognize_document_type
 
 ALLOWED_TYPES = {"pdf", "png", "jpg", "jpeg"}
 MAX_SIZE_DEFAULT_MB = 10  # 兜底；权威值在 sys_params.attachment.max_size_mb（P2-1）
+ALLOWED_CATEGORIES = {"invoice", "contract", "itinerary", "payment_basis", "other"}
+
+# 轻量 magic bytes 校验（P1-9）：扩展名与实际内容不匹配拒绝
+_MAGIC = {
+    "pdf": b"%PDF-",
+    "png": b"\x89PNG",
+    "jpg": b"\xff\xd8\xff",
+    "jpeg": b"\xff\xd8\xff",
+}
 
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-async def upload(db: Session, user: User, doc_id: int, file: UploadFile) -> DocumentAttachment:
+def _check_magic_bytes(ext: str, data: bytes) -> None:
+    magic = _MAGIC.get(ext)
+    if magic and data[:len(magic)] != magic:
+        raise HTTPException(400, f"文件内容与扩展名 .{ext} 不匹配，已拒绝上传")
+
+
+async def upload(db: Session, user: User, doc_id: int, file: UploadFile,
+                 document_category: str | None = None) -> DocumentAttachment:
     document_service.ensure_editable(db, user, doc_id)  # L2 + L3
 
     ext = (file.filename or "").rsplit(".", 1)[-1].lower() if file.filename else ""
@@ -43,6 +59,15 @@ async def upload(db: Session, user: User, doc_id: int, file: UploadFile) -> Docu
         raise HTTPException(400, f"文件超过 {max_mb}MB 上限")
     if not data:
         raise HTTPException(400, "空文件")
+    _check_magic_bytes(ext, data)  # P1-9：伪装扩展名拒绝
+
+    # P1-9：类别优先级 = 用户明确指定 > 文件名自动识别 > other
+    if document_category is not None:
+        if document_category not in ALLOWED_CATEGORIES:
+            raise HTTPException(400, f"document_category 取值: {sorted(ALLOWED_CATEGORIES)}")
+        category = document_category
+    else:
+        category = recognize_document_type(file.filename or "")
 
     # 存储路径：data/uploads/<doc_id>/<uuid>.<ext>（路径可控，禁止用户输入进路径）
     rel_dir = Path(str(doc_id))
@@ -55,7 +80,7 @@ async def upload(db: Session, user: User, doc_id: int, file: UploadFile) -> Docu
     att = DocumentAttachment(
         document_id=doc_id,
         document_version=0,  # 暂存附件，提交时绑定版本
-        document_category=recognize_document_type(file.filename or ""),  # 按文件名识别类别（P1-2）
+        document_category=category,
         file_name=file.filename or f"{file_id}.{ext}",
         file_type=ext,
         file_size=len(data),

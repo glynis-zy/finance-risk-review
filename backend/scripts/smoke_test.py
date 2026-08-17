@@ -63,23 +63,25 @@ check("分析任务1 成功", t1["task_status"] == "succeeded")
 rpt = client.get("/api/v1/analysis-tasks/1/report", headers=h).json()
 check("CP 报告整体风险=low", rpt["overall_risk_level"] == "low", rpt["overall_risk_level"])
 
-# 8. 高风险单据的报告（审批人可看）
-wangwu = client.post("/api/v1/auth/login", json={"username": "wangwu", "password": "123456"}).json()
-hw = {"Authorization": f"Bearer {wangwu['access_token']}"}
-t2 = client.get("/api/v1/analysis-tasks/2/report", headers=hw).json()
+# 8. 高风险单据的报告（单据申请人可看自己的报告；审批人按 resolver 负载均衡分派）
+lisi = client.post("/api/v1/auth/login", json={"username": "lisi", "password": "123456"}).json()
+hlisi = {"Authorization": f"Bearer {lisi['access_token']}"}
+t2 = client.get("/api/v1/analysis-tasks/2/report", headers=hlisi).json()
 check("AP 报告整体风险=high", t2["overall_risk_level"] == "high", t2["overall_risk_level"])
 check("AP 含供应商黑名单风险项",
-      any("黑名单" in f["risk_title"] for f in client.get("/api/v1/analysis-tasks/2/findings", headers=hw).json()))
+      any("黑名单" in f["risk_title"] for f in client.get("/api/v1/analysis-tasks/2/findings", headers=hlisi).json()))
 
 # 9. 审批待办与通过
+wangwu = client.post("/api/v1/auth/login", json={"username": "wangwu", "password": "123456"}).json()
+hw = {"Authorization": f"Bearer {wangwu['access_token']}"}
 tasks = client.get("/api/v1/approval-tasks", headers=hw).json()
 check("审批人 wangwu 有待办", len(tasks) >= 1, f"count={len(tasks)}")
 first = tasks[0]
 approve = client.post(f"/api/v1/approval-tasks/{first['task_id']}/approve", headers=hw)
 check("审批通过接口", approve.status_code == 200, approve.json())
 
-# 10. 报告导出
-exp = client.get(f"/api/v1/review-reports/{t2['report_id']}/export", headers=hw)
+# 10. 报告导出（AP 申请人 lisi）
+exp = client.get(f"/api/v1/review-reports/{t2['report_id']}/export", headers=hlisi)
 check("报告导出 HTML", exp.status_code == 200 and "<html" in exp.text.lower())
 
 # 11. 附件下载
@@ -110,22 +112,31 @@ check("其他令牌不受影响", client.get("/api/v1/auth/me", headers=h).statu
 # 16. L2 数据权限越权（P0-1）：张三不能读/导出/看到李四的
 t2st = client.get("/api/v1/analysis-tasks/2", headers=h).status_code
 check("张三不能读李四的分析任务状态", t2st == 403, f"-> {t2st}")
-rep2 = client.get("/api/v1/analysis-tasks/2/report", headers=hw).json()   # wangwu 可见 AP 报告
+rep2 = client.get("/api/v1/analysis-tasks/2/report", headers=hlisi).json()  # AP 申请人 lisi 可见
 exp2 = client.get(f"/api/v1/review-reports/{rep2['report_id']}/export", headers=h).status_code
 check("张三不能导出李四的报告", exp2 == 403, f"-> {exp2}")
 zhang_list = client.get("/api/v1/review-reports", headers=h).json()
 zhang_nos = [r["document_no"] for r in zhang_list]
 check("张三报告列表不含李四单据", "AP-20260816-002" not in zhang_nos, str(zhang_nos))
 
-# 审批人 sunqi（无分配任务）不能复核未分配给自己的报告；wangwu（有任务）可以
-sunqi = client.post("/api/v1/auth/login", json={"username": "sunqi", "password": "123456"}).json()
-hs = {"Authorization": f"Bearer {sunqi['access_token']}"}
-mr_deny = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
-                      headers=hs, json={"review_result": "approved", "review_comment": "x"}).status_code
-check("未分配任务的审批人不能复核报告", mr_deny == 403, f"-> {mr_deny}")
-mr_ok = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
-                    headers=hw, json={"review_result": "manual", "review_comment": "收到"}).status_code
-check("分配任务的审批人能复核报告", mr_ok == 200, f"-> {mr_ok}")
+# 审批人复核范围：对 AP 有任务者可复核，无任务者不可（resolver 负载均衡下动态找）
+approvers = []
+for uname in ["wangwu", "sunqi", "liuxi"]:
+    tok = client.post("/api/v1/auth/login", json={"username": uname, "password": "123456"}).json()
+    hh = {"Authorization": f"Bearer {tok['access_token']}"}
+    docs = {t["document_id"] for t in client.get("/api/v1/approval-tasks", headers=hh).json()}
+    approvers.append((uname, hh, docs))
+has_ap = next((hh for _, hh, docs in approvers if 2 in docs), None)
+no_ap = next((hh for _, hh, docs in approvers if 2 not in docs), None)
+if has_ap and no_ap:
+    mr_deny = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
+                          headers=no_ap, json={"review_result": "confirmed", "review_comment": "x"}).status_code
+    check("未分配任务的审批人不能复核报告", mr_deny == 403, f"-> {mr_deny}")
+    mr_ok = client.post(f"/api/v1/review-reports/{rep2['report_id']}/manual-reviews",
+                        headers=has_ap, json={"review_result": "needs_material", "review_comment": "需补充发票"}).status_code
+    check("分配任务的审批人能复核报告", mr_ok == 200, f"-> {mr_ok}")
+else:
+    check("能找到有/无 AP 任务的审批人", False, "负载均衡下未找到对比用户")
 
 # 15. 管理端（用户/角色/系统参数）
 admin = client.post("/api/v1/auth/login", json={"username": "admin", "password": "123456"}).json()
@@ -171,12 +182,63 @@ wv2 = client.post("/api/v1/approval-workflows", headers=ha, json={
     "nodes": [{"node_name": "x", "approver_role": "bogus", "node_order": 1}]}).status_code
 check("非法审批角色被拒(400)", wv2 == 400, f"-> {wv2}")
 
-rp = client.patch("/api/v1/admin/roles/1/permissions", headers=ha,
-                  json={"permission_codes": ["document:view"]}).status_code
-check("角色权限更新 SQL 正常", rp == 200, f"-> {rp}")
 client.patch("/api/v1/admin/sys-params/attachment.max_size_mb", headers=ha, json={"param_value": "10"})
 aud = client.get("/api/v1/audit-logs", headers=ha).json()
 check("sys param 更新写审计日志", any(a["action_type"] == "sys_param:update" for a in aud))
+
+# 18. 第四轮：finance/approver 职责 / parse 权限 / magic bytes / category / 规则 config 校验
+zh = client.post("/api/v1/auth/login", json={"username": "zhangsan", "password": "123456"}).json()
+hz = {"Authorization": f"Bearer {zh['access_token']}"}
+zl = client.post("/api/v1/auth/login", json={"username": "zhaoliu", "password": "123456"}).json()
+hzf = {"Authorization": f"Bearer {zl['access_token']}"}
+lx = client.post("/api/v1/auth/login", json={"username": "liuxi", "password": "123456"}).json()
+hlx = {"Authorization": f"Bearer {lx['access_token']}"}
+
+# finance-only 不能正式审批（无 approval:process）
+w_tasks = client.get("/api/v1/approval-tasks", headers=hw).json()
+if w_tasks:
+    deny = client.post(f"/api/v1/approval-tasks/{w_tasks[0]['task_id']}/approve", headers=hzf,
+                       json={"review_comment": ""}).status_code
+    check("finance-only 不能正式审批(403)", deny == 403, f"-> {deny}")
+# finance+approver 用户具备审批能力（liuxi 权限含 approval:process）
+lx_me = client.get("/api/v1/auth/me", headers=hlx).json()
+check("finance+approver 具备审批权限", "approval:process" in lx_me["permission_codes"])
+
+# parse 权限（P1-8：analysis:create + L2 可见）；lisi 看不到 CP 单据 → L2 拒绝
+att0 = detail["attachments"][0]
+p_deny = client.post(f"/api/v1/documents/{cp['id']}/attachments/{att0['id']}/parse", headers=hlisi).status_code
+check("无数据权限不能触发解析(403)", p_deny == 403, f"-> {p_deny}")
+p_ok = client.post(f"/api/v1/documents/{cp['id']}/attachments/{att0['id']}/parse", headers=hw).status_code
+check("有 analysis:create + 可见可解析(200)", p_ok == 200, f"-> {p_ok}")
+
+# magic bytes：PNG 内容伪装成 .pdf → 400
+import io
+png_magic = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+fd = {"file": ("fake.pdf", io.BytesIO(png_magic), "application/pdf")}
+r = client.post(f"/api/v1/documents/{ndoc_id}/attachments", headers=h, files=fd)
+check("伪装扩展名上传被拒(400)", r.status_code == 400, f"-> {r.status_code}")
+
+# 用户指定 document_category 生效
+r2 = client.post(
+    f"/api/v1/documents/{ndoc_id}/attachments?document_category=contract",
+    headers=h,
+    files={"file": ("随便.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"y" * 32), "image/png")},
+)
+check("指定 document_category 生效", r2.status_code == 200 and r2.json().get("document_category") == "contract",
+      r2.text[:80])
+
+# 非法 risk rule config 保存失败
+rules = client.get("/api/v1/rules", headers=hzf).json()
+r_bad = client.patch(f"/api/v1/rules/{rules[0]['id']}", headers=hzf, json={
+    "rule_code": rules[0]["rule_code"], "rule_name": rules[0]["rule_name"],
+    "enabled": True, "config": {"tolerance_pct": "abc"},
+}).status_code
+check("非法规则 config 被拒(400)", r_bad == 400, f"-> {r_bad}")
+
+# 19. 角色权限更新 SQL（select().delete() 修复）——放最后，避免 clobber 影响前面 applicant 操作
+rp = client.patch("/api/v1/admin/roles/1/permissions", headers=ha,
+                  json={"permission_codes": ["document:view"]}).status_code
+check("角色权限更新 SQL 正常", rp == 200, f"-> {rp}")
 
 print("\n==== 结果:", len(OK), "PASS /", len(FAIL), "FAIL ====")
 sys.exit(1 if FAIL else 0)

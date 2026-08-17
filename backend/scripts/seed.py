@@ -113,12 +113,13 @@ ROLE_PERMS = {
 }
 
 USERS = [
-    ("zhangsan", "张三", "applicant", "manager"),
-    ("lisi", "李四", "applicant", "staff"),
-    ("wangwu", "王五", "approver", "manager"),
-    ("sunqi", "孙七", "approver", "staff"),   # 第二个审批人（无分配任务，用于越权测试）
-    ("zhaoliu", "赵六", "finance", "staff"),
-    ("admin", "管理员", "admin", "manager"),
+    ("zhangsan", "张三", ["applicant"], "manager"),
+    ("lisi", "李四", ["applicant"], "staff"),
+    ("wangwu", "王五", ["approver"], "manager"),
+    ("sunqi", "孙七", ["approver"], "staff"),   # 第二个审批人（无分配任务，用于越权测试）
+    ("zhaoliu", "赵六", ["finance"], "staff"),
+    ("liuxi", "刘希", ["finance", "approver"], "manager"),  # 财务负责人：多角色（财务+审批）
+    ("admin", "管理员", ["admin"], "manager"),
 ]
 
 RULE_CONFIGS = {
@@ -165,33 +166,40 @@ def seed_identity(db) -> dict[str, User]:
             if role_code == "admin" or code in codes:
                 db.add(RolePermission(role_id=role.id, permission_id=perm.id))
     users = {}
-    for username, display, role_code, level in USERS:
+    for username, display, role_codes, level in USERS:
         u = User(username=username, display_name=display,
                  password_hash=hash_password("123456"), status="active",
                  position_level=level)
         db.add(u)
         db.flush()
-        db.add(UserRole(user_id=u.id, role_id=roles[role_code].id))
+        for rc in role_codes:  # 一个用户允许多角色（P0-2）
+            db.add(UserRole(user_id=u.id, role_id=roles[rc].id))
         users[username] = u
     return users
 
 
 def seed_workflows(db) -> None:
+    # P0-2：正式审批节点统一 approver 角色（财务专业复核走 analysis:review / ManualReview）
+    # P0-3：priority 大者优先；对公付款大额(>=50000)走更高优先级流程
     wf_defs = [
-        ("对公付款审批", "company_payment", {"amount_min": 0},
-         [("部门主管审批", "approver", 1), ("财务复核", "finance", 2)]),
-        ("预付审批", "advance_payment", {"amount_min": 0},
-         [("部门主管审批", "approver", 1), ("财务复核", "finance", 2)]),
-        ("批量付款复核", "batch_payment", {"amount_min": 0},
-         [("财务复核", "finance", 1)]),
-        ("费用报销审批", "expense", {"amount_min": 0},
+        ("对公付款审批", "company_payment", {"amount_min": 0}, 0,
+         [("部门主管审批", "approver", 1), ("财务负责人审批", "approver", 2)]),
+        ("大额对公付款审批", "company_payment", {"amount_min": 50000}, 10,
+         [("部门主管审批", "approver", 1), ("财务负责人审批", "approver", 2),
+          ("财务负责人复审", "approver", 3)]),
+        ("预付审批", "advance_payment", {"amount_min": 0}, 0,
+         [("部门主管审批", "approver", 1), ("财务负责人审批", "approver", 2)]),
+        ("批量付款复核", "batch_payment", {"amount_min": 0}, 0,
+         [("财务负责人审批", "approver", 1)]),
+        ("费用报销审批", "expense", {"amount_min": 0}, 0,
          [("部门主管审批", "approver", 1)]),
-        ("差旅报销审批", "travel", {"amount_min": 0},
+        ("差旅报销审批", "travel", {"amount_min": 0}, 0,
          [("部门主管审批", "approver", 1)]),
     ]
-    for name, dtype, cond, nodes in wf_defs:
+    for name, dtype, cond, priority, nodes in wf_defs:
         wf = ApprovalWorkflow(workflow_name=name, document_type=dtype,
-                              match_conditions_json=cond, status="active")
+                              match_conditions_json=cond, priority=priority,
+                              status="active")
         db.add(wf)
         db.flush()
         for nname, role, order in nodes:
@@ -347,7 +355,7 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
         db.add(DocumentLineItem(document_id=d3.id, item_type="payment", item_name=name,
                                 amount=Decimal(amt), remark=acct))
     _attach(db, d3, "付款回单_批量.png", {
-        "category": "payment_doc", "fields": {"batch_total": 30000, "count": 3},
+        "category": "payment_basis", "fields": {"batch_total": 30000, "count": 3},
         "confidence": 0.98,
     })
     docs.append((d3, users["zhangsan"]))

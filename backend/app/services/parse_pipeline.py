@@ -26,12 +26,12 @@ from app.clients import ocr as ocr_client
 
 logger = logging.getLogger(__name__)
 
-# 文档类别识别：文件名提示词
+# 文档类别识别：文件名提示词（P1：标准枚举 invoice/contract/itinerary/payment_basis/other）
 CATEGORY_HINTS: dict[str, list[str]] = {
     "invoice": ["发票", "invoice"],
     "contract": ["合同", "contract"],
     "itinerary": ["行程", "itinerary", "机票", "火车票", "订票"],
-    "payment_doc": ["付款", "payment", "回单", "水单", "银行", "转账"],
+    "payment_basis": ["付款", "payment", "回单", "水单", "银行", "转账"],
 }
 
 
@@ -40,7 +40,7 @@ def recognize_document_type(file_name: str) -> str:
     for cat, hints in CATEGORY_HINTS.items():
         if any(h in lower for h in hints):
             return cat
-    return "invoice"  # 默认按发票处理
+    return "other"  # 未命中 → other（不再是 invoice）
 
 
 def _extract_text_pdf(path: Path) -> str | None:

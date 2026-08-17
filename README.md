@@ -68,7 +68,9 @@ uvicorn app.main:app --reload --workers 1 --port 8000
 
 打开 http://127.0.0.1:8000 即可使用。
 
-**演示账号**（密码均 `123456`）：`zhangsan`/`lisi`（单据申请人）、`wangwu`（审批人员）、`zhaoliu`（财务人员）、`admin`（系统管理员）。
+**演示账号**（密码均 `123456`）：`zhangsan`/`lisi`（单据申请人）、`wangwu`/`sunqi`（审批人员）、`zhaoliu`（财务人员）、`liuxi`（财务负责人 = **finance+approver 多角色**）、`admin`（系统管理员）。
+
+> 职责：`finance` 做财务专业审核/风险复核/规则/供应商；`approver` 做正式审批（approve/return/reject）。正式审批节点一律 approver 角色；真实职级用 `position_level`，不拆成多个 RBAC 角色。
 
 ## 演示链路（规格 2.7.15 验收）
 

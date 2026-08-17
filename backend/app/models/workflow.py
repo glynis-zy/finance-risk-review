@@ -15,6 +15,7 @@ class ApprovalWorkflow(TimestampMixin, Base):
     workflow_name: Mapped[str] = mapped_column(String(64))
     document_type: Mapped[str] = mapped_column(String(32), index=True)
     match_conditions_json: Mapped[dict] = mapped_column(JSON)  # {amount_min, amount_max, department}
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # 匹配优先级，大者优先（P0-3）
     status: Mapped[str] = mapped_column(String(16), default="active")
 
 

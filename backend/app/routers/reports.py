@@ -22,7 +22,8 @@ router = APIRouter(prefix="/review-reports", tags=["reports"])
 
 
 class ManualReviewIn(BaseModel):
-    review_result: str   # approved / return / reject / manual
+    # P1-7：人工复核 ≠ 正式审批。枚举：confirmed / needs_material / escalated
+    review_result: str
     review_comment: str
 
 
@@ -80,8 +81,8 @@ def submit_manual_review(
     user: User = Depends(require_perm("approval:process")),
     db: Session = Depends(get_db),
 ):
-    if payload.review_result not in ("approved", "return", "reject", "manual"):
-        raise HTTPException(400, "review_result 取值: approved/return/reject/manual")
+    if payload.review_result not in ("confirmed", "needs_material", "escalated"):
+        raise HTTPException(400, "review_result 取值: confirmed/needs_material/escalated")
     report = db.get(ReviewReport, report_id)
     if report is None:
         raise HTTPException(404, "报告不存在")

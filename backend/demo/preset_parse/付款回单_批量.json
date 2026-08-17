@@ -1,5 +1,5 @@
 {
-  "category": "payment_doc",
+  "category": "payment_basis",
   "fields": {
     "batch_total": 30000,
     "count": 3

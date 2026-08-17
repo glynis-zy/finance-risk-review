@@ -177,6 +177,15 @@ def copy(db: Session, user: User, doc_id: int) -> FinancialDocument:
     )
     db.add(new)
     db.flush()
+    # P1-12：复制明细（不复制附件/版本/审批/分析/报告/日志）
+    for li in db.scalars(select(DocumentLineItem).where(
+            DocumentLineItem.document_id == src.id)).all():
+        db.add(DocumentLineItem(
+            document_id=new.id, item_type=li.item_type, item_name=li.item_name,
+            specification=li.specification, expense_date=li.expense_date,
+            expense_location=li.expense_location, quantity=li.quantity,
+            unit_price=li.unit_price, amount=li.amount, remark=li.remark,
+        ))
     audit_service.log(db, user, "document:copy", "document", f"{src.id}->{new.id}")
     db.commit()
     db.refresh(new)
@@ -242,6 +251,7 @@ def withdraw(db: Session, user: User, doc_id: int) -> FinancialDocument:
                 t.task_status = "cancelled"
                 t.processed_at = datetime.utcnow()
 
+    analysis_service.cancel_for_document(db, doc.id)  # P0-5：取消未完成分析任务
     _transition(db, doc, WITHDRAWN, user, "申请人撤回")
     audit_service.log(db, user, "document:withdraw", "document", str(doc.id))
     db.commit()
@@ -269,12 +279,8 @@ def void(db: Session, user: User, doc_id: int) -> FinancialDocument:
             )).all():
                 t.task_status = "cancelled"
                 t.processed_at = datetime.utcnow()
-        # 必要时取消尚未开始的分析任务
-        for t in db.scalars(select(AnalysisTask).where(
-                AnalysisTask.document_id == doc.id,
-                AnalysisTask.task_status.in_(["queued", "querying_document"]),
-        )).all():
-            t.task_status = "cancelled"
+    # P0-5：取消该单据未完成的分析任务（含运行中，pipeline 合作式检查停止）
+    analysis_service.cancel_for_document(db, doc.id)
 
     _transition(db, doc, VOIDED, user, "作废")
     audit_service.log(db, user, "document:void", "document", str(doc.id))

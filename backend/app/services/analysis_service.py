@@ -91,66 +91,15 @@ def _report_payload(report, task) -> dict:
 
 
 def compare_amounts(db: Session, user: User, doc_id: int) -> AmountComparisonOut:
-    """金额核对面板：单据/明细/发票/合同/付款金额对照（规格 2.7.13）。"""
+    """金额核对面板（P1-13）：L2 校验后复用 amount_service 唯一计算。"""
+    from app.services.amount_service import calculate_amount_comparison
     doc = db.get(FinancialDocument, doc_id)
     if doc is None:
         raise HTTPException(404, "单据不存在")
     ids = visible_document_ids(db, user)
     if ids is not None and doc.id not in ids:
         raise HTTPException(403, "无权访问该单据")
-
-    line_items_total = db.scalar(
-        select(func.coalesce(func.sum(DocumentLineItem.amount), 0)).where(
-            DocumentLineItem.document_id == doc.id)
-    ) or Decimal(0)
-
-    # 发票合计：单据附件关联的发票含税金额之和
-    invoice_total = db.scalar(
-        select(func.coalesce(func.sum(InvoiceRecord.amount_including_tax), 0))
-        .join(DocumentAttachment, DocumentAttachment.id == InvoiceRecord.attachment_id)
-        .where(DocumentAttachment.document_id == doc.id)
-    ) or Decimal(0)
-
-    # 合同金额：附件解析结果里 document_category=contract 的 fields.contract_amount
-    contract_amount: Decimal | None = None
-    parse_rows = db.execute(
-        select(AttachmentParseResult.fields_json)
-        .join(DocumentAttachment, DocumentAttachment.id == AttachmentParseResult.attachment_id)
-        .where(
-            DocumentAttachment.document_id == doc.id,
-            AttachmentParseResult.document_category == "contract",
-        )
-    ).scalars().all()
-    for fields in parse_rows:
-        if fields and fields.get("contract_amount") is not None:
-            contract_amount = Decimal(str(fields["contract_amount"]))
-            break
-
-    payment_amount = doc.total_amount
-    if doc.document_type == "batch_payment":
-        payment_amount = db.scalar(
-            select(func.coalesce(func.sum(DocumentLineItem.amount), 0)).where(
-                DocumentLineItem.document_id == doc.id,
-                DocumentLineItem.item_type == "payment",
-            )
-        ) or Decimal(0)
-
-    differences = {
-        "document_minus_line_items": (doc.total_amount - line_items_total),
-        "document_minus_invoice": (doc.total_amount - invoice_total),
-        "document_minus_contract": (
-            (doc.total_amount - contract_amount) if contract_amount is not None else None
-        ),
-        "document_minus_payment": (doc.total_amount - payment_amount),
-    }
-    return AmountComparisonOut(
-        document_total=doc.total_amount,
-        line_items_total=line_items_total,
-        invoice_total=invoice_total,
-        contract_amount=contract_amount,
-        payment_amount=payment_amount,
-        differences=differences,
-    )
+    return calculate_amount_comparison(db, doc)
 
 
 def get_status(db: Session, user: User, task_id: int) -> dict:
@@ -209,6 +158,30 @@ def enqueue(task_id: int) -> None:
     _get_loop().call_soon_threadsafe(lambda: asyncio.create_task(run_pipeline(task_id)))
 
 
+def cancel_for_document(db: Session, document_id: int) -> None:
+    """作废/撤回时取消该单据未完成的分析任务（P0-5）。"""
+    for t in db.scalars(select(AnalysisTask).where(
+            AnalysisTask.document_id == document_id,
+            AnalysisTask.task_status.in_(
+                ("queued", "querying_document", "loading_attachments",
+                 "parsing_attachments", "analyzing"),
+            ),
+    )).all():
+        t.task_status = "cancelled"
+        t.finished_at = datetime.utcnow()
+
+
+def _is_aborted(db: Session, task_id: int) -> bool:
+    """合作式取消检查（P0-5）：任务被 cancelled 或单据被撤回/作废 → 停止流水线。"""
+    db.expire_all()  # 读最新（取消来自其他会话）
+    from app.models.document import FinancialDocument
+    task = db.get(AnalysisTask, task_id)
+    if task is None or task.task_status == "cancelled":
+        return True
+    doc = db.get(FinancialDocument, task.document_id)
+    return doc is None or doc.document_status in ("withdrawn", "voided")
+
+
 async def run_pipeline(task_id: int) -> None:
     """分析流水线：querying_document → loading_attachments → parsing_attachments → analyzing → succeeded。"""
     from app.db.session import SessionLocal
@@ -223,8 +196,12 @@ async def run_pipeline(task_id: int) -> None:
         task = db.get(AnalysisTask, task_id)
         if task is None:
             return
+        if _is_aborted(db, task_id):  # 入口先查取消，避免 _stage 覆盖已 cancelled 状态
+            return
         mark_started(db, task)
         _stage(db, task, "querying_document")
+        if _is_aborted(db, task_id):
+            return
 
         doc = db.get(FinancialDocument, task.document_id)
         if doc is None:
@@ -233,16 +210,22 @@ async def run_pipeline(task_id: int) -> None:
             return
 
         _stage(db, task, "loading_attachments")
+        if _is_aborted(db, task_id):
+            return
         attachments = list(db.scalars(select(DocumentAttachment).where(
             DocumentAttachment.document_id == doc.id)).all())
 
         _stage(db, task, "parsing_attachments")
+        if _is_aborted(db, task_id):
+            return
         for att in attachments:
             if att.parse_status != "succeeded":
                 await parse_pipeline.parse_attachment(db, att)
                 db.commit()
 
         _stage(db, task, "analyzing")
+        if _is_aborted(db, task_id):
+            return
         from app.services import sysparam_service
         ctx = build_context(db, doc)
         findings = run_all(ctx)
@@ -261,6 +244,8 @@ async def run_pipeline(task_id: int) -> None:
             ))
         db.commit()
 
+        if _is_aborted(db, task_id):  # 报告生成前最后一道取消检查（P0-5）
+            return
         report_service.generate(db, task, doc, findings, overall)
         task.task_status = "succeeded"
         task.current_step = None

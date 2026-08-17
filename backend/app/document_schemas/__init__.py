@@ -46,7 +46,7 @@ TYPE_FIELD_SCHEMAS: dict[str, list[dict]] = {
 REQUIRED_ATTACHMENTS: dict[str, list[str]] = {
     "company_payment": ["contract", "invoice"],
     "advance_payment": ["contract"],
-    "batch_payment": ["payment_doc"],
+    "batch_payment": ["payment_basis"],
     "expense": ["invoice"],
     "travel": ["invoice", "itinerary"],
 }

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """附件路由：上传 / 下载 / 删除 / 解析触发（规格 2.7.11）。"""
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -23,11 +23,13 @@ _MEDIA = {
 async def upload_attachment(
     document_id: int,
     file: UploadFile = File(...),
+    document_category: str | None = Query(default=None),   # P1-9：可选，用户明确指定类别
     user: User = Depends(require_perm("document:edit")),
     db: Session = Depends(get_db),
 ):
-    att = await attachment_service.upload(db, user, document_id, file)
-    return {"id": att.id, "file_name": att.file_name, "parse_status": att.parse_status}
+    att = await attachment_service.upload(db, user, document_id, file, document_category)
+    return {"id": att.id, "file_name": att.file_name, "document_category": att.document_category,
+            "parse_status": att.parse_status}
 
 
 @router.get("/{document_id}/attachments/{attachment_id}")
@@ -61,10 +63,10 @@ def delete_attachment(
 async def trigger_parse(
     document_id: int,
     attachment_id: int,
-    user: User = Depends(require_perm("document:view")),
+    user: User = Depends(require_perm("analysis:create")),   # P1-8：能查看 ≠ 能触发 OCR/改解析数据
     db: Session = Depends(get_db),
 ):
-    """触发单个附件解析（失败置 manual_review，可重试）。"""
+    """触发单个附件解析（失败置 failed，可重试）；L2 可见校验仍在 download 中。"""
     att = attachment_service.download(db, user, document_id, attachment_id)
     result = await parse_pipeline.parse_attachment(db, att)
     db.commit()

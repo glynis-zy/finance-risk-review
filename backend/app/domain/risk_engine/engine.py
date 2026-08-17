@@ -1,146 +1,31 @@
 # -*- coding: utf-8 -*-
-"""规则引擎：10 条规则注册表 + 确定性判定 + 整体风险等级。
+"""风险引擎：规则注册表 + run_all + compute_overall_level。
 
-设计口径（用户确认 + 架构文档 §10 / §8）：
-- 每条规则 = 一个纯函数 check_xxx(ctx)，只读数据与配置，无随机、无模型调用；
-- 风险结论永远由本引擎决定，LLM 只做报告润色；
-- 整体风险 = 最高单项 + 数量升级（有 high→high；medium≥3→high；low≥5→medium）。
+数据模型在 models.py，上下文构建在 context.py；本文件保留 run_all / compute_overall_level
+与 10 条规则判定函数（rules/ 子拆解为规划项）。风险结论确定（无随机、无 LLM 调用）。
 """
 import logging
-from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from app.core.config import settings
-
-logger = logging.getLogger(__name__)
 from app.document_schemas import REQUIRED_ATTACHMENTS
-from app.models.analysis import RiskFinding
+from app.domain.risk_engine.context import (  # noqa: F401  供外部与规则使用
+    DEFAULT_CONFIGS,
+    RuleContext,
+    build_context,
+    load_configs,
+)
+from app.domain.risk_engine.models import Finding, LEVEL_SCORE  # noqa: F401
 from app.models.attachment import (
     AttachmentParseResult,
     DocumentAttachment,
     InvoiceRecord,
 )
-from app.models.document import DocumentLineItem, FinancialDocument
-from app.models.reference import ExpenseStandard, MarketPriceReference, RiskRule, SupplierProfile
+from app.models.reference import ExpenseStandard
 
-LEVEL_SCORE = {"low": 1, "medium": 2, "high": 3}
-
-
-@dataclass
-class Finding:
-    risk_type: str
-    risk_level: str
-    risk_title: str
-    description: str
-    actual: dict | None = None
-    reference: dict | None = None
-    threshold: dict | None = None
-    evidence: dict | None = None
-    suggestion: str | None = None
-
-
-@dataclass
-class RuleContext:
-    db: Session
-    document: FinancialDocument
-    line_items: list[DocumentLineItem]
-    attachments: list[DocumentAttachment]
-    invoices: list[InvoiceRecord]
-    parse_results: list[AttachmentParseResult]
-    supplier: SupplierProfile | None
-    history: list[FinancialDocument]
-    configs: dict[str, dict]
-    standards: list[ExpenseStandard]
-    price_refs: list[MarketPriceReference]
-    position_level: str | None = None   # 申请人职级（费用标准规则维度）
-
-
-def build_context(db: Session, document: FinancialDocument) -> RuleContext:
-    """汇总单据、明细、附件、发票、解析结果、供应商、历史、配置、标准数据。"""
-    line_items = list(db.scalars(select(DocumentLineItem).where(
-        DocumentLineItem.document_id == document.id)).all())
-    attachments = list(db.scalars(select(DocumentAttachment).where(
-        DocumentAttachment.document_id == document.id)).all())
-    att_ids = [a.id for a in attachments]
-    invoices = []
-    parse_results = []
-    if att_ids:
-        invoices = list(db.scalars(select(InvoiceRecord).where(
-            InvoiceRecord.attachment_id.in_(att_ids))).all())
-        parse_results = list(db.scalars(select(AttachmentParseResult).where(
-            AttachmentParseResult.attachment_id.in_(att_ids))).all())
-
-    # 供应商：对公/预付按 type_fields.supplier_name，其余按 payee_name
-    supplier = None
-    tf = document.type_fields_json or {}
-    supplier_name = tf.get("supplier_name") or document.payee_name
-    if supplier_name:
-        supplier = db.scalar(select(SupplierProfile).where(
-            SupplierProfile.supplier_name == supplier_name))
-
-    # 申请人历史单据（排除当前），供消费异常/历史突增
-    history = list(db.scalars(select(FinancialDocument).where(
-        FinancialDocument.applicant_id == document.applicant_id,
-        FinancialDocument.id != document.id,
-        FinancialDocument.document_status.in_(["approved", "pending_review", "reviewing"]),
-    )).all())
-
-    # 申请人职级（费用标准规则维度，规格 2.7.7：类别×部门×职级×地区）
-    from app.models.user import User
-    applicant = db.get(User, document.applicant_id)
-    position_level = applicant.position_level if applicant else None
-
-    configs = load_configs(db)
-    # P2-2：置信度阈值以 sys_params 为唯一权威来源（附件完整性规则）
-    from app.services.sysparam_service import get as _get_param
-    _conf = _get_param(db, "attachment.confidence_threshold")
-    if _conf is not None:
-        try:
-            configs.setdefault("attachment_completeness", {})["confidence_threshold"] = float(_conf)
-        except ValueError:
-            pass
-    standards = list(db.scalars(select(ExpenseStandard)).all())
-    price_refs = list(db.scalars(select(MarketPriceReference)).all())
-    return RuleContext(
-        db=db, document=document, line_items=line_items, attachments=attachments,
-        invoices=invoices, parse_results=parse_results, supplier=supplier,
-        history=history, configs=configs, standards=standards, price_refs=price_refs,
-        position_level=position_level,
-    )
-
-
-def load_configs(db: Session) -> dict[str, dict]:
-    """读取 risk_rules 表配置；无记录用默认值。"""
-    result = {}
-    rows = db.execute(select(RiskRule)).scalars().all()
-    for r in rows:
-        cfg = dict(r.config_json or {})
-        cfg["enabled"] = r.enabled
-        if r.applies_to_json:
-            cfg["document_types"] = r.applies_to_json.get("document_types")
-        result[r.rule_code] = cfg
-    for code, default in DEFAULT_CONFIGS.items():
-        result.setdefault(code, dict(default))
-    return result
-
-
-DEFAULT_CONFIGS: dict[str, dict] = {
-    "invoice_amount_consistency": {"tolerance_pct": 0.5},
-    "line_items_total": {"tolerance_pct": 0.5},
-    "contract_payment_consistency": {"tolerance_pct": 0.5, "ratio_gap": 10},
-    "batch_payment_consistency": {"tolerance_pct": 0.5},
-    "expense_policy_compliance": {"exceed_pct": 20},
-    "price_reasonableness": {"deviation_pct": 20},
-    "spend_anomaly": {"history_spike_ratio": 3.0},
-    "supplier_risk": {},
-    # confidence_threshold 由 sys_params（attachment.confidence_threshold）注入，见 build_context
-    "attachment_completeness": {},
-    "duplicate_invoice": {},
-}
+logger = logging.getLogger(__name__)
 
 
 def run_all(ctx: RuleContext) -> list[Finding]:

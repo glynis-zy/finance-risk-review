@@ -19,6 +19,18 @@ GUARD: dict[str, set[str]] = {
     "void": {DRAFT, PENDING},
 }
 
+# 状态迁移合法表：当前状态 → 允许的目标状态集合（P0-4）
+TRANSITIONS: dict[str, set[str]] = {
+    DRAFT: {PENDING, VOIDED},
+    PENDING: {REVIEWING, RETURNED, REJECTED, WITHDRAWN, VOIDED},
+    REVIEWING: {APPROVED, RETURNED, REJECTED},
+    RETURNED: {PENDING},
+    APPROVED: set(),
+    REJECTED: set(),
+    WITHDRAWN: set(),
+    VOIDED: set(),
+}
+
 
 def guard(document, action: str) -> None:
     """动作在当前状态是否允许（不允许抛 409）。"""
@@ -29,7 +41,12 @@ def guard(document, action: str) -> None:
 
 def transition(db: Session, document, to_status: str, operator_id: int,
                remark: str = "") -> None:
-    """统一状态流转：写 DocumentStatusLog + 更新 status。operator 必须是真实操作人。"""
+    """统一状态流转：先校验 当前→目标 迁移合法性（非法抛 409），
+    再写 DocumentStatusLog + 更新 status。operator 必须是真实操作人。"""
+    allowed = TRANSITIONS.get(document.document_status, set())
+    if to_status not in allowed:
+        raise HTTPException(
+            409, f"非法状态迁移: {document.document_status} → {to_status}")
     from app.models.document import DocumentStatusLog
     db.add(DocumentStatusLog(
         document_id=document.id,

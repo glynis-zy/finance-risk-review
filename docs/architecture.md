@@ -202,7 +202,9 @@ draft / pending_review ──作废──▶ voided
 
 补充规则：
 - **撤回**：仅允许当前节点任务尚未被处理时；`withdrawn` / `voided` / `rejected` 为终态。
-- **作废（P0-2 终态守卫）**：作废审批中单据会**取消 running 审批实例 + pending 任务 + 未开始分析任务**；`approve/return/reject` 除校验任务 `pending` 外，还必须校验实例 `running` 且单据状态 ∈ `pending_review/reviewing`——终态单据不会被旧审批任务再次迁移。
+- **作废（P0-2 终态守卫）**：作废审批中单据会**取消 running 审批实例 + pending 任务 + 未完成分析任务**；`approve/return/reject` 除校验任务 `pending` 外，还必须校验实例 `running` 且单据状态 ∈ `pending_review/reviewing`——终态单据不会被旧审批任务再次迁移。
+- **合法性校验（P0-4）**：`document_state.TRANSITIONS` 定义 当前→目标 合法集合；`transition()` 内部校验非法迁移（draft→approved 等）→ 409。所有 `document_status` 修改只经 `transition()`。
+- **取消分析（P0-5）**：`void/withdraw` 调 `cancel_for_document`；`run_pipeline` 在入口与各阶段前合作式检查（任务 cancelled / 单据 withdrawn·voided）→ 立即停止，不生成报告。
 - `reviewing` 是"实例运行中"期间的单据状态，避免与 `pending_review`（已提交待处理）混淆。
 
 审批实例状态：`pending → running → approved/returned/rejected/cancelled`
@@ -238,6 +240,10 @@ draft / pending_review ──作废──▶ voided
 
 **关键点**：三层叠加，缺一不可。例如"申请人"即便角色有删除权限，也不能删除非本人单据（L2），且只能编辑 `draft/returned` 状态的单据（L3）。
 
+**finance / approver 职责（P0-2）**：`finance` = 财务专业审核、风险复核（`analysis:review`/`ManualReview`）、规则/供应商；`approver` = 正式审批（approve/return/reject）。正式 ApprovalTask 节点一律 `approver` 角色。一个用户可多角色（如财务负责人 = finance+approver），真实职级用 `position_level` 表达，不拆 RBAC 角色。
+
+**审批人 Resolver（P0-1）**：`resolve_approver` 候选=持节点角色且具 `approval:process` 的 active 用户，**排除申请人**；按待办数 ASC → user.id ASC 确定性选择；无合法审批人 → 409（不产生 approver_id=None 的任务）。
+
 ---
 
 ## 10. 规则引擎（D3，10 条规则全实现）
@@ -263,7 +269,7 @@ def check_rule(ctx: RuleContext) -> list[Finding]
 | 9 | `attachment_completeness` | 必需附件缺失 + **OCR 置信度低于阈值**（清晰度代理指标） | attachment_parse_results.confidence | 置信度阈值 |
 | 10 | `duplicate_invoice` | 按发票代码/号码/金额/开票日期/销售方 + 文件 hash 识别重复提交 | invoice_records | 全库匹配 |
 
-**确定性保证**：规则只读数据与配置，无随机、无模型调用；每条 finding 必须携带 `actual_value / reference_value / threshold / evidence / data_source`（对应规格 2.7.7 最后一条）。
+**确定性保证**：规则判定确定（无随机、无 LLM 调用，可读 DB/配置）；每条 finding 携带 `actual_value / reference_value / threshold / evidence / data_source`。规则 config 保存时做轻量校验（已知字段类型/范围，P1-10）。金额核对由 `services/amount_service.py` 唯一实现（P1-13，页面与报告同源）。
 
 > 费用标准的四维数据来源：类别=明细名称→科目（关键词）；部门=单据 `budget_department`；**职级=申请人 `users.position_level`**；地区=明细 `expense_location`。匹配策略：维度指定但不匹配的标准排除，命中维度越多越优先，全空标准作宽松兜底。
 >

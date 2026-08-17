@@ -80,10 +80,10 @@ const API = {
   },
 
   // ---- 附件 ----
-  uploadAtt: (id, file) => API.upload(`/documents/${id}/attachments`, file),
+  uploadAtt: (id, file, category) =>
+    API.upload(`/documents/${id}/attachments?document_category=${encodeURIComponent(category || '')}`, file),
   delAtt: (id, aid) => API.request('DELETE', `/documents/${id}/attachments/${aid}`),
   parseAtt: (id, aid) => API.request('POST', `/documents/${id}/attachments/${aid}/parse`),
-  attUrl: (id, aid) => `/api/v1/documents/${id}/attachments/${aid}`,
 
   // ---- 对话 ----
   createSession: () => API.request('POST', '/review-sessions'),
@@ -114,7 +114,6 @@ const API = {
   supplierLookup: (name) => API.request('GET', `/suppliers/lookup?name=${encodeURIComponent(name)}`),
   listReports: () => API.request('GET', '/review-reports'),
   manualReview: (rid, body) => API.request('POST', `/review-reports/${rid}/manual-reviews`, body),
-  exportUrl: (rid) => `/api/v1/review-reports/${rid}/export`,
   auditLogs: () => API.request('GET', '/audit-logs'),
 
   // ---- 管理端 ----
