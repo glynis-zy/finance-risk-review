@@ -84,6 +84,7 @@ ALL_PERMISSIONS = [
     ("document:submit", "提交单据", "document", "submit"),
     ("document:withdraw", "撤回单据", "document", "withdraw"),
     ("document:void", "作废单据", "document", "void"),
+    ("document:delete", "删除单据", "document", "delete"),
     ("approval:view", "查看审批任务", "approval", "view"),
     ("approval:process", "处理审批任务", "approval", "process"),
     ("analysis:view", "查看分析结果", "analysis", "view"),
@@ -103,7 +104,7 @@ ALL_PERMISSIONS = [
 
 ROLE_PERMS = {
     "applicant": ["document:view", "document:create", "document:edit", "document:submit",
-                  "document:withdraw", "document:void", "session:chat",
+                  "document:withdraw", "document:void", "document:delete", "session:chat",
                   "analysis:view", "analysis:create"],
     "approver": ["document:view", "approval:view", "approval:process",
                  "analysis:view", "analysis:create", "supplier:view"],

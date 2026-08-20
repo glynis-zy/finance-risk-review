@@ -60,6 +60,7 @@ const API = {
   submitDoc: (id) => API.request('POST', `/documents/${id}/submit`),
   withdrawDoc: (id) => API.request('POST', `/documents/${id}/withdraw`),
   voidDoc: (id) => API.request('POST', `/documents/${id}/void`),
+  delDoc: (id) => API.request('DELETE', `/documents/${id}`),
   addLineItem: (id, body) => API.request('POST', `/documents/${id}/line-items`, body),
   updateLineItem: (id, lid, body) => API.request('PATCH', `/documents/${id}/line-items/${lid}`, body),
   delLineItem: (id, lid) => API.request('DELETE', `/documents/${id}/line-items/${lid}`),

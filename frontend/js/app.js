@@ -157,12 +157,14 @@ async function documentsView(el) {
         ${['draft', 'returned'].includes(d.document_status) ? `<button class="btn ok sm" onclick="act('${d.id}','submit')">提交</button>` : ''}
         ${d.document_status === 'pending_review' ? `<button class="btn warn sm" onclick="act('${d.id}','withdraw')">撤回</button>` : ''}
         ${['draft', 'pending_review'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','void')">作废</button>` : ''}
+        ${['draft', 'returned'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','delete')">删除</button>` : ''}
         </td></tr>`).join('') || '<tr><td colspan=7>暂无</td></tr>'}
       </tbody>`;
   };
   window.act = async (id, a) => {
-    const fn = { submit: API.submitDoc, withdraw: API.withdrawDoc, void: API.voidDoc }[a];
-    try { await fn(id); alert(a === 'submit' ? '已提交审批' : a === 'withdraw' ? '已撤回' : '已作废'); loadDocs(); }
+    if (a === 'delete' && !confirm('确定删除该单据？删除后不可恢复。')) return;
+    const fn = { submit: API.submitDoc, withdraw: API.withdrawDoc, void: API.voidDoc, delete: API.delDoc }[a];
+    try { await fn(id); alert({ submit: '已提交审批', withdraw: '已撤回', void: '已作废', delete: '已删除' }[a]); loadDocs(); }
     catch (e) { alert(e.message); }
   };
   loadDocs();

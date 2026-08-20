@@ -85,6 +85,16 @@ def update_document(
         document_service.update(db, user, document_id, payload))
 
 
+@router.delete("/{document_id}")
+def delete_document(
+    document_id: int,
+    user: User = Depends(require_perm("document:delete")),
+    db: Session = Depends(get_db),
+):
+    document_service.delete(db, user, document_id)
+    return {"ok": True}
+
+
 @router.post("/{document_id}/copy", response_model=DocumentOut)
 def copy_document(
     document_id: int,

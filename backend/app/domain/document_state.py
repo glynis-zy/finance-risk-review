@@ -17,6 +17,7 @@ GUARD: dict[str, set[str]] = {
     "submit": {DRAFT, RETURNED},
     "withdraw": {PENDING},
     "void": {DRAFT, PENDING},
+    "delete": {DRAFT, RETURNED},
 }
 
 # 状态迁移合法表：当前状态 → 允许的目标状态集合（P0-4）
