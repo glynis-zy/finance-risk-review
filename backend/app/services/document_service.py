@@ -493,6 +493,7 @@ def _line_items_out(items: list[DocumentLineItem]) -> list[dict]:
 def _att_out(a: DocumentAttachment) -> dict:
     return {
         "id": a.id, "file_name": a.file_name, "file_type": a.file_type,
+        "document_category": a.document_category,
         "file_size": a.file_size, "storage_status": a.storage_status,
         "parse_status": a.parse_status, "document_version": a.document_version,
     }

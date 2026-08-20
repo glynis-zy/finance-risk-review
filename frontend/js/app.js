@@ -1,6 +1,14 @@
 /* 前端主逻辑：hash 路由 + 视图渲染（原生 JS，无框架）。
    共享工具（esc/fmt/badge/TYPE_LABELS/下载等）在 ui.js；视图按 section 组织。 */
 
+const CAT_LABELS = {
+  invoice: '发票',
+  contract: '合同',
+  itinerary: '行程单',
+  payment_basis: '付款依据',
+  other: '其他'
+};
+
 /* ---------- 工具：动态表单（元数据驱动） ---------- */
 function typeFieldsHTML(fields, values) {
   return fields.map(f => {
@@ -249,7 +257,7 @@ async function docEditView(el, id) {
     document.getElementById('att-list').innerHTML = `
       <table><thead><tr><th>文件名</th><th>类型</th><th>解析状态</th><th>操作</th></tr></thead>
       <tbody>${attachments.map(a => `
-        <tr><td>${esc(a.file_name)}</td><td>${a.file_type}</td>
+        <tr><td>${esc(a.file_name)}</td><td>${CAT_LABELS[a.document_category] || a.document_category || a.file_type}</td>
         <td>${esc(a.parse_status)}</td>
         <td><button class="btn ghost sm" onclick="dlAtt(${doc ? doc.id : id}, ${a.id}, '${esc(a.file_name)}')">下载</button>
             <button class="btn ghost sm" onclick="parseAtt(${a.id})">解析</button>
@@ -499,7 +507,7 @@ function bindRiskActions(body, findings) {
 function attTabHTML(detail) {
   return `<table><thead><tr><th>文件名</th><th>类型</th><th>大小</th><th>解析状态</th><th>操作</th></tr></thead>
     <tbody>${(detail.attachments || []).map(a => `
-      <tr><td>${esc(a.file_name)}</td><td>${a.file_type}</td><td>${(a.file_size / 1024).toFixed(1)}KB</td>
+      <tr><td>${esc(a.file_name)}</td><td>${CAT_LABELS[a.document_category] || a.document_category || a.file_type}</td><td>${(a.file_size / 1024).toFixed(1)}KB</td>
       <td>${esc(a.parse_status)}</td>
       <td><button class="btn ghost sm" onclick="dlAtt(${detail.document.id}, ${a.id}, '${esc(a.file_name)}')">下载/预览</button>
       <button class="btn ghost sm" onclick="tryParse(${a.id})">解析</button></td></tr>`).join('') || '<tr><td colspan=5>无附件</td></tr>'}

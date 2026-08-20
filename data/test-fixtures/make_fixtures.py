@@ -7,7 +7,8 @@
 运行：
     python make_fixtures.py
 输出到同目录：invoice_sample.png / invoice_mismatch_sample.png /
-            contract_sample.png / itinerary_sample.png
+            contract_sample.png / itinerary_sample.png /
+            payment_basis_sample.png
 """
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
@@ -151,7 +152,28 @@ def make_contract():
 
 
 # ---------------------------------------------------------------------------
-# 4) 出差行程单（北京，8/15-8/16 含周末）—— 命中差旅「周末消费」规则
+# 4) 银行转账回单（付款依据）—— 批量付款单必需附件类别 payment_basis
+# ---------------------------------------------------------------------------
+def make_payment_basis():
+    img, d = new_sheet("银行转账回单")
+    y = 100
+    y = kv_block(d, y, [
+        ("付款账户", "测试集团有限责任公司 1100 **** **** 8888"),
+        ("收款账户", "恒通科技有限公司 3100 **** **** 1234"),
+        ("交易时间", "2026-08-18 14:32:18"),
+        ("交易流水号", "TXN202608180000123456"),
+    ])
+    y = line(d, y, "附言：8月技术服务费付款（批量付款批次：8月供应商付款）")
+    y += 20
+    d.rectangle([40, y, 860, y + 70], outline="#1f3a5f", width=2)
+    d.text((60, y + 18), "转账金额：¥20,000.00", font=load_font(30), fill="#b00020")
+    d.text((520, y + 22), "状态：交易成功", font=load_font(22), fill="black")
+    img.save(OUT / "payment_basis_sample.png")
+    print("written payment_basis_sample.png")
+
+
+# ---------------------------------------------------------------------------
+# 5) 出差行程单（北京，8/15-8/16 含周末）—— 命中差旅「周末消费」规则
 # ---------------------------------------------------------------------------
 def make_itinerary():
     img, d = new_sheet("出差行程单")
@@ -178,5 +200,6 @@ if __name__ == "__main__":
     make_invoice_normal()
     make_invoice_mismatch()
     make_contract()
+    make_payment_basis()
     make_itinerary()
     print("ALL DONE ->", OUT)
