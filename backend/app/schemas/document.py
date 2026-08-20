@@ -47,6 +47,7 @@ class LineItemCreate(BaseModel):
 
 
 class LineItemUpdate(BaseModel):
+    item_type: str | None = None         # P1-13：允许修改明细类型（批量付款需 item_type=payment）
     item_name: str | None = None
     specification: str | None = None
     expense_date: date | None = None
