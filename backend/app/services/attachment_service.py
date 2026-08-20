@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.scopes import visible_document_ids
-from sqlalchemy import delete
+from sqlalchemy import delete as sa_delete
 
 from app.models.attachment import AttachmentParseResult, DocumentAttachment, InvoiceRecord
 from app.models.document import FinancialDocument
@@ -116,9 +116,9 @@ def delete(db: Session, user: User, doc_id: int, attachment_id: int) -> None:
     if att is None or att.document_id != doc_id:
         raise HTTPException(404, "附件不存在")
     # P1-12：删除附件时级联删除解析结果与发票记录，避免 MySQL FK 错误 / 脏数据
-    db.execute(delete(AttachmentParseResult).where(
+    db.execute(sa_delete(AttachmentParseResult).where(
         AttachmentParseResult.attachment_id == attachment_id))
-    db.execute(delete(InvoiceRecord).where(InvoiceRecord.attachment_id == attachment_id))
+    db.execute(sa_delete(InvoiceRecord).where(InvoiceRecord.attachment_id == attachment_id))
     path = Path(settings.file_storage_path) / att.file_path
     if path.exists():
         path.unlink()
