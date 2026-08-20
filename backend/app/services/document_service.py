@@ -139,7 +139,7 @@ def create(db: Session, user: User, payload: DocumentCreate) -> FinancialDocumen
 
 
 def delete(db: Session, user: User, doc_id: int) -> None:
-    """删除单据：仅 draft/returned 状态的申请人本人/管理员可删；级联清理关联表与附件文件。"""
+    """删除单据：draft/returned/withdrawn 状态的申请人本人/管理员可删；级联清理关联表与附件文件。"""
     doc = _ensure_visible(db, user, doc_id)
     _ensure_owner(db, user, doc)
     _guard(doc, "delete")
@@ -206,6 +206,9 @@ def update(db: Session, user: User, doc_id: int, payload: DocumentUpdate) -> Fin
     for k, v in data.items():
         if v is not None:
             setattr(doc, k, v)
+    # 已撤回单据重新编辑后回到草稿，可再次提交
+    if doc.document_status == WITHDRAWN:
+        _transition(db, doc, DRAFT, user, "撤回后重新编辑")
     audit_service.log(db, user, "document:update", "document", str(doc.id))
     db.commit()
     db.refresh(doc)

@@ -13,11 +13,11 @@ APPROVED, REJECTED, WITHDRAWN, VOIDED = "approved", "rejected", "withdrawn", "vo
 # L3 动作守卫：动作 → 允许的当前状态
 # submit 同时承担首次提交(draft) 与退回后重提交(returned)，生成新版本+新实例+新分析任务
 GUARD: dict[str, set[str]] = {
-    "edit": {DRAFT, RETURNED},
+    "edit": {DRAFT, RETURNED, WITHDRAWN},
     "submit": {DRAFT, RETURNED},
     "withdraw": {PENDING},
     "void": {DRAFT, PENDING},
-    "delete": {DRAFT, RETURNED},
+    "delete": {DRAFT, RETURNED, WITHDRAWN},
 }
 
 # 状态迁移合法表：当前状态 → 允许的目标状态集合（P0-4）
@@ -28,7 +28,7 @@ TRANSITIONS: dict[str, set[str]] = {
     RETURNED: {PENDING},
     APPROVED: set(),
     REJECTED: set(),
-    WITHDRAWN: set(),
+    WITHDRAWN: {DRAFT},
     VOIDED: set(),
 }
 

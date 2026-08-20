@@ -153,11 +153,11 @@ async function documentsView(el) {
         <td>${esc(d.applicant_department)}</td><td>${esc(d.budget_department)}</td>
         <td>¥${fmt(d.total_amount)}</td><td>${stBadge(d.document_status)}</td>
         <td><a class="btn ghost sm" href="#/document/${d.id}">详情</a>
-        ${['draft', 'returned'].includes(d.document_status) ? `<a class="btn ghost sm" href="#/document-edit/${d.id}">编辑</a>` : ''}
+        ${['draft', 'returned', 'withdrawn'].includes(d.document_status) ? `<a class="btn ghost sm" href="#/document-edit/${d.id}">编辑</a>` : ''}
         ${['draft', 'returned'].includes(d.document_status) ? `<button class="btn ok sm" onclick="act('${d.id}','submit')">提交</button>` : ''}
         ${d.document_status === 'pending_review' ? `<button class="btn warn sm" onclick="act('${d.id}','withdraw')">撤回</button>` : ''}
         ${['draft', 'pending_review'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','void')">作废</button>` : ''}
-        ${['draft', 'returned'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','delete')">删除</button>` : ''}
+        ${['draft', 'returned', 'withdrawn'].includes(d.document_status) ? `<button class="btn danger sm" onclick="act('${d.id}','delete')">删除</button>` : ''}
         </td></tr>`).join('') || '<tr><td colspan=7>暂无</td></tr>'}
       </tbody>`;
   };
