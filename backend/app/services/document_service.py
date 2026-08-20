@@ -21,6 +21,7 @@ from app.models.attachment import AttachmentParseResult, DocumentAttachment, Inv
 from app.models.document import (
     DOCUMENT_TYPES,
     DocumentLineItem,
+    DocumentStatusLog,
     DocumentVersion,
     FinancialDocument,
 )
