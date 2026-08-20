@@ -208,7 +208,7 @@ async function docEditView(el, id) {
       <h3 class="mt">附件</h3>
       <div id="att-list"></div>
       <div class="toolbar mt">
-        <input type="file" id="att-file">
+        <input type="file" id="att-file" multiple>
         <select id="att-cat">
           <option value="">自动识别</option>
           <option value="invoice">发票</option>
@@ -218,6 +218,7 @@ async function docEditView(el, id) {
           <option value="other">其他</option>
         </select>
         <button class="btn sm" onclick="uploadAtt()">上传附件</button>
+        ${doc ? '' : '<span class="msg info" style="margin-left:8px">新建单据请先点「保存」，保存时会自动上传已选附件</span>'}
       </div>
       <div class="toolbar mt"><button class="btn" onclick="saveDoc(${doc ? doc.id : 'null'})">保存</button>
         ${doc && ['draft', 'returned'].includes(doc.document_status) ? '<button class="btn ok" onclick="saveDoc(' + doc.id + ', true)">保存并提交</button>' : ''}
@@ -261,10 +262,17 @@ async function docEditView(el, id) {
     catch (e) { alert(e.message); }
   };
   window.uploadAtt = async () => {
-    const f = document.getElementById('att-file').files[0];
-    if (!f) return;
+    const files = document.getElementById('att-file').files;
+    if (!files || files.length === 0) return;
+    if (!doc) {
+      alert('新建单据请先点「保存」，保存时会自动上传已选附件。');
+      return;
+    }
     const cat = document.getElementById('att-cat').value;
-    try { await API.uploadAtt(doc.id, f, cat); renderAtt(); } catch (e) { alert(e.message); }
+    try {
+      for (const f of files) await API.uploadAtt(doc.id, f, cat);
+      renderAtt();
+    } catch (e) { alert(e.message); }
   };
 
   window.saveDoc = async (did, submit) => {
@@ -306,9 +314,9 @@ async function docEditView(el, id) {
       for (const oid of origLineItemIds) {
         if (!keptIds.includes(oid)) await API.delLineItem(sid, oid);   // 已删除 → 数据库同步删
       }
-      // 上传附件
-      const f = document.getElementById('att-file').files[0];
-      if (f) await API.uploadAtt(sid, f);
+      // 上传附件（支持一次选多张，新建时随保存自动上传）
+      const files = document.getElementById('att-file').files;
+      for (const f of files) await API.uploadAtt(sid, f);
       if (submit) await API.submitDoc(sid);
       location.hash = '#/document/' + sid;
     } catch (e) { alert(e.message); }
