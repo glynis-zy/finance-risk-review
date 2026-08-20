@@ -239,7 +239,7 @@ async function docEditView(el, id) {
     const tb = document.querySelector('#li-table tbody');
     tb.innerHTML = lineItems.map((li, i) => `
       <tr data-i="${i}" data-id="${li.id || ''}">
-        <td><select class="li-type"><option ${li.item_type === 'payment' ? 'selected' : ''}>payment</option><option ${li.item_type !== 'payment' ? 'selected' : ''}>expense</option></select></td>
+        <td><select class="li-type"><option value="payment" ${li.item_type === 'payment' ? 'selected' : ''}>付款</option><option value="expense" ${li.item_type !== 'payment' ? 'selected' : ''}>费用</option></select></td>
         <td><input class="li-name" value="${esc(li.item_name)}"></td>
         <td><input class="li-spec" value="${esc(li.specification || '')}" placeholder="规格"></td>
         <td><input class="li-date" type="date" value="${esc(li.expense_date || '')}"></td>
@@ -250,7 +250,11 @@ async function docEditView(el, id) {
         <td><button class="btn danger sm" onclick="delLiRow(${i})">删</button></td>
       </tr>`).join('');
   };
-  window.addLiRow = () => { lineItems.push({ item_type: 'expense', item_name: '', amount: 0 }); renderLi(); };
+  window.addLiRow = () => {
+    const isBatch = (document.getElementById('e-type') || {}).value === 'batch_payment';
+    lineItems.push({ item_type: isBatch ? 'payment' : 'expense', item_name: '', amount: 0 });
+    renderLi();
+  };
   window.delLiRow = (i) => { lineItems.splice(i, 1); renderLi(); };
 
   window.renderAtt = () => {
