@@ -51,12 +51,13 @@ if [ ! -f "$BACKEND_DIR/.env" ]; then
 DATABASE_URL=mysql+pymysql://atguigu:${DB_PASS}@${DB_HOST}:3306/finance_risk?charset=utf8mb4
 JWT_SECRET=${JWT_SECRET}
 JWT_EXPIRE_MINUTES=120
-# LLM：DeepSeek 默认；如改用自建/AutoDL 模型，改 LLM_BASE_URL/LLM_API_KEY/LLM_MODEL
-# 自建推理网关常为自签证书；演示环境启用 LLM_INSECURE_SSL=true（OpenAI 客户端跳过 SSL 校验）
-LLM_BASE_URL=https://api.deepseek.com/v1
+# LLM：AutoDL 算力云 Qwen3-8B（OpenAI 兼容，已接入）；如需换 DeepSeek/其他，改下面三行
+# 密钥留空 = auto 模式解析失败回退预制；部署后 vim 填 LLM_API_KEY 再 restart
+# AutoDL 公网映射为自签证书；演示环境 LLM_INSECURE_SSL=true 跳过校验（生产对外 API 建议关闭）
+LLM_BASE_URL=https://u1132348-8415-715a8889.bjb1.seetacloud.com:8443/v1
 LLM_API_KEY=
-LLM_MODEL=deepseek-chat
-LLM_INSECURE_SSL=false
+LLM_MODEL=qwen3-8b
+LLM_INSECURE_SSL=true
 OCR_API_KEY=
 OCR_SECRET_KEY=
 OCR_BASE_URL=https://aip.baidubce.com
