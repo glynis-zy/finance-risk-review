@@ -15,6 +15,7 @@ const API = {
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await fetch('/api/v1' + path, opts);
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && this.token) this._kickToLogin();
     if (!res.ok) {
       const msg = (data && data.detail) || `请求失败 (${res.status})`;
       throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
@@ -27,8 +28,15 @@ const API = {
     fd.append('file', file);
     const res = await fetch('/api/v1' + path, { method: 'POST', headers: { 'Authorization': 'Bearer ' + this.token }, body: fd });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && this.token) this._kickToLogin();
     if (!res.ok) throw new Error((data && data.detail) || `上传失败 (${res.status})`);
     return data;
+  },
+
+  // token 过期/失效 → 清本地凭证并跳回登录页
+  _kickToLogin() {
+    this.clearAuth();
+    setTimeout(() => { if (location.hash !== '#/login') location.hash = '#/login'; }, 200);
   },
 
   setAuth(token, user) {
