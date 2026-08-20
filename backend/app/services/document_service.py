@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -149,8 +149,8 @@ def delete(db: Session, user: User, doc_id: int) -> None:
         select(ApprovalInstance.id).where(ApprovalInstance.document_id == doc_id)
     ).all()
     if instance_ids:
-        db.execute(delete(ApprovalTask).where(ApprovalTask.instance_id.in_(instance_ids)))
-        db.execute(delete(ApprovalInstance).where(ApprovalInstance.document_id == doc_id))
+        db.execute(sa_delete(ApprovalTask).where(ApprovalTask.instance_id.in_(instance_ids)))
+        db.execute(sa_delete(ApprovalInstance).where(ApprovalInstance.document_id == doc_id))
 
     # 2) 分析任务 → 报告 → 人工复核 / 风险项
     task_ids = db.scalars(
@@ -161,30 +161,30 @@ def delete(db: Session, user: User, doc_id: int) -> None:
             select(ReviewReport.id).where(ReviewReport.task_id.in_(task_ids))
         ).all()
         if report_ids:
-            db.execute(delete(ManualReview).where(ManualReview.report_id.in_(report_ids)))
-        db.execute(delete(ReviewReport).where(ReviewReport.task_id.in_(task_ids)))
-        db.execute(delete(RiskFinding).where(RiskFinding.task_id.in_(task_ids)))
-        db.execute(delete(AnalysisTask).where(AnalysisTask.document_id == doc_id))
+            db.execute(sa_delete(ManualReview).where(ManualReview.report_id.in_(report_ids)))
+        db.execute(sa_delete(ReviewReport).where(ReviewReport.task_id.in_(task_ids)))
+        db.execute(sa_delete(RiskFinding).where(RiskFinding.task_id.in_(task_ids)))
+        db.execute(sa_delete(AnalysisTask).where(AnalysisTask.document_id == doc_id))
     # ReviewReport 也可能按 document_id 直接关联
-    db.execute(delete(ReviewReport).where(ReviewReport.document_id == doc_id))
+    db.execute(sa_delete(ReviewReport).where(ReviewReport.document_id == doc_id))
 
     # 3) 附件 → 解析结果/发票记录/物理文件
     attachments = db.scalars(
         select(DocumentAttachment).where(DocumentAttachment.document_id == doc_id)
     ).all()
     for att in attachments:
-        db.execute(delete(AttachmentParseResult).where(
+        db.execute(sa_delete(AttachmentParseResult).where(
             AttachmentParseResult.attachment_id == att.id))
-        db.execute(delete(InvoiceRecord).where(InvoiceRecord.attachment_id == att.id))
+        db.execute(sa_delete(InvoiceRecord).where(InvoiceRecord.attachment_id == att.id))
         path = Path(settings.file_storage_path) / att.file_path
         if path.exists():
             path.unlink()
         db.delete(att)
 
     # 4) 单据子表与单据本身
-    db.execute(delete(DocumentLineItem).where(DocumentLineItem.document_id == doc_id))
-    db.execute(delete(DocumentVersion).where(DocumentVersion.document_id == doc_id))
-    db.execute(delete(DocumentStatusLog).where(DocumentStatusLog.document_id == doc_id))
+    db.execute(sa_delete(DocumentLineItem).where(DocumentLineItem.document_id == doc_id))
+    db.execute(sa_delete(DocumentVersion).where(DocumentVersion.document_id == doc_id))
+    db.execute(sa_delete(DocumentStatusLog).where(DocumentStatusLog.document_id == doc_id))
 
     db.delete(doc)
     audit_service.log(db, user, "document:delete", "document", str(doc_id))
