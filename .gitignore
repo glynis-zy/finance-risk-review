@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.idea/
 
 # ---- 密钥与环境配置（.env.example 保留跟踪）----
 .env
@@ -20,6 +21,10 @@ backend/data/
 backend/smoke.db
 *.db
 *.sqlite3
+*_out.txt
+
+# ---- WorkBuddy 工作区数据（memory 等，不入库）----
+.workbuddy/
 
 # ---- 日志 ----
 *.log

@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class DocumentCreate(BaseModel):
@@ -96,6 +96,12 @@ class DocumentOut(BaseModel):
         validation_alias="type_fields_json",   # 读 ORM 的 type_fields_json
         serialization_alias="type_fields",     # 序列化回 type_fields
     )
+
+    @field_validator("type_fields", mode="before")
+    @classmethod
+    def _type_fields_never_none(cls, v):
+        """容忍历史/空数据：无专属字段的单据（如费用报销单）type_fields_json 可能为 NULL。"""
+        return v if isinstance(v, dict) else {}
 
 
 class AmountComparisonOut(BaseModel):

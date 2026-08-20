@@ -137,13 +137,18 @@ RULE_CONFIGS = {
 
 
 def wipe(db) -> None:
-    """按依赖倒序清空全部表。"""
-    tables = [SessionMessage, ReviewSession, ManualReview, ReviewReport, RiskFinding,
-              AnalysisTask, ApprovalTask, ApprovalInstance, ApprovalWorkflowNode,
+    """按依赖倒序清空全部表。
+    FK 链：SessionMessage→ReviewSession；ManualReview→ReviewReport→AnalysisTask；
+    AnalysisTask→(ReviewSession, FinancialDocument)。故删除顺序：
+    SessionMessage → ManualReview → ReviewReport → RiskFinding → AnalysisTask → ReviewSession。
+    """
+    tables = [SessionMessage, ManualReview, ReviewReport, RiskFinding, AnalysisTask,
+              ReviewSession, ApprovalTask, ApprovalInstance, ApprovalWorkflowNode,
               ApprovalWorkflow, InvoiceRecord, AttachmentParseResult, DocumentAttachment,
               DocumentStatusLog, DocumentVersion, DocumentLineItem, FinancialDocument,
               ExpenseStandard, MarketPriceReference, SupplierProfile, RiskRule,
-              RevokedToken, AuditLog, RolePermission, UserRole, Permission, Role, User]
+              RevokedToken, AuditLog, RolePermission, UserRole, Permission, Role,
+              SysParam, User]
     for t in tables:
         db.execute(delete(t))
     db.commit()
@@ -366,6 +371,7 @@ def seed_documents(db, users: dict[str, User]) -> list[dict]:
         applicant_id=users["lisi"].id, applicant_department="销售部", budget_department="销售部",
         payee_name="个人垫付", payee_account="lisi-reimburse", expense_category="差旅",
         total_amount=Decimal("1800"), currency="CNY", apply_date=today, reason_text="客户拜访费用",
+        type_fields_json={},  # expense 无专属字段；显式空 dict 避免 NULL 触发 DTO 校验
     )
     db.add(d4); db.flush()
     wk = today - timedelta(days=4)  # 工作日

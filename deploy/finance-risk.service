@@ -1,0 +1,16 @@
+# 财务单据智能风险审核系统 - systemd 服务单元（模板）
+# 部署脚本 deploy.sh 会自动生成；手动部署时把 <BACKEND_DIR> 替换为实际路径。
+# 注意：进程内异步队列仅支持单进程，--workers 1 是硬约束，禁止改动。
+
+[Unit]
+Description=Finance Risk Review
+After=network.target mysql.service
+
+[Service]
+WorkingDirectory=<BACKEND_DIR>
+ExecStart=<BACKEND_DIR>/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

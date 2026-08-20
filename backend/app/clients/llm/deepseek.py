@@ -7,6 +7,7 @@ LLM 输出必须是严格 JSON，经 Pydantic 校验后才进入业务；失败�
 import json
 import logging
 
+import httpx
 from openai import OpenAI
 
 from app.core.config import settings
@@ -22,7 +23,11 @@ def _get_client() -> OpenAI:
     if _client is None:
         if not settings.llm_api_key:
             raise RuntimeError("LLM_API_KEY 未配置（见 .env）")
-        _client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+        kwargs: dict = {"api_key": settings.llm_api_key, "base_url": settings.llm_base_url}
+        if getattr(settings, "llm_insecure_ssl", False):
+            # AutoDL/自建推理网关常为自签证书；演示环境按需跳过校验
+            kwargs["http_client"] = httpx.Client(verify=False)
+        _client = OpenAI(**kwargs)
     return _client
 
 
@@ -30,6 +35,9 @@ def _chat_json(system: str, user: str, schema_cls) -> object | None:
     """调用 LLM，强制 JSON 输出，用 schema_cls 校验。失败返回 None。"""
     try:
         client = _get_client()
+        # Qwen3 默认开启 <think> 深度思考，会污染结构化输出和报告润色
+        # 通过 chat_template_kwargs 在 vLLM / Qwen3 上禁用思考；DeepSeek 等后端忽略未知字段
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
         resp = client.chat.completions.create(
             model=settings.llm_model,
             messages=[
@@ -38,6 +46,7 @@ def _chat_json(system: str, user: str, schema_cls) -> object | None:
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
+            extra_body=extra_body,
         )
         raw = resp.choices[0].message.content or ""
         return schema_cls(**json.loads(raw))
@@ -81,6 +90,7 @@ def polish_risk_report(summary: str, findings: list[dict]) -> str:
     )
     try:
         client = _get_client()
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}  # Qwen3 关闭思考
         resp = client.chat.completions.create(
             model=settings.llm_model,
             messages=[
@@ -88,6 +98,7 @@ def polish_risk_report(summary: str, findings: list[dict]) -> str:
                 {"role": "user", "content": f"单据摘要：{summary}\n风险项：{json.dumps(findings, ensure_ascii=False)}"},
             ],
             temperature=0.3,
+            extra_body=extra_body,
         )
         return resp.choices[0].message.content or summary
     except Exception as exc:  # noqa: BLE001

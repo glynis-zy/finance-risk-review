@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-08-17
+
+### 17:00 - 前后端联调测试（真实 HTTP）+ 修复 4 个问题
+- 新增 `scripts/integration_test.py`（45 项真实 HTTP 断言，模拟前端 API 层）：认证/单据生命周期（新建-明细-附件-金额核对-提交-分析-报告-导出-复制）/审批（跨审批人负载均衡）/对话 NLU/规则与流程/供应商黑名单/人工复核/管理端/系统参数/审计/越权与注销。
+- **最终 45 PASS / 0 FAIL**（MySQL + 真实 LLM/OCR key；pytest 52/52 无回归）。
+- 联调发现并修复 4 个问题：
+  1. **`.env` 编码损坏**：DATABASE_URL/OCR_API_KEY 被吞进注释行 → 重建 .env（密钥保留）。
+  2. **P0 `routers/suppliers.py` 缺 `HTTPException` 导入**（lookup 404 分支 500）。
+  3. **P0 `schemas/document.py` `DocumentOut.type_fields` 不兼容 NULL**（expense 单 type_fields_json=NULL → 列表 500）；加 field_validator 容忍 + seed EX 单显式 `{}`。
+  4. **P1 `scripts/seed.py` wipe FK 依赖顺序**：`analysis_tasks.session_id→review_sessions`、`review_reports.task_id→analysis_tasks`、`sys_params.updated_by→users` 三层链，对话触发分析后重建必挂；调整 wipe 顺序后全链路可反复重建。
+- 新增 `docs/INTEGRATION_TEST.md`（测试矩阵/4 问题根因/复现方式）。
+- 关键验证：真实 DeepSeek 润色（报告含"AI 风险说明"小节）、真实 OCR 失败回退预制（auto 模式）、规则引擎真实触发（新 CP 单 high）、审批 Resolver 负载均衡（新单任务分配给 liuxi）。
+
+---
+
 ## 2026-08-16
 
 ### 08:40 - 立项与决策收敛（访谈阶段）

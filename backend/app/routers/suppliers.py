@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """供应商路由：风险信息查询。"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db

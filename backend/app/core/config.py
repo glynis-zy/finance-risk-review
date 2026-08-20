@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
+    # AutoDL/自建推理网关常为自签证书；演示/本地环境设为 true 跳过 SSL 校验
+    llm_insecure_ssl: bool = False
 
     # ---- OCR（百度云：增值税发票识别 + 通用文字识别）----
     ocr_api_key: str = ""

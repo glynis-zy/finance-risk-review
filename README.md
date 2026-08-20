@@ -89,11 +89,11 @@ uvicorn app.main:app --reload --workers 1 --port 8000
 # 先用 SQLite 跑一遍全链路（无需 MySQL）
 $env:DATABASE_URL="sqlite:///./smoke.db"
 python scripts/seed.py
-python scripts/smoke_test.py     # 27 项端到端断言
+python scripts/smoke_test.py     # 48 项端到端断言
 
 # 单元测试（规则引擎等纯逻辑）
 pip install -r requirements-dev.txt
-python -m pytest tests -q          # 14 条用例
+python -m pytest tests -q          # 52 条用例
 ```
 
 ## 管理端
