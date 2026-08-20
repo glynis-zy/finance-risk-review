@@ -81,7 +81,9 @@ const API = {
 
   // ---- 附件 ----
   uploadAtt: (id, file, category) =>
-    API.upload(`/documents/${id}/attachments?document_category=${encodeURIComponent(category || '')}`, file),
+    API.upload(category
+      ? `/documents/${id}/attachments?document_category=${encodeURIComponent(category)}`
+      : `/documents/${id}/attachments`, file),
   delAtt: (id, aid) => API.request('DELETE', `/documents/${id}/attachments/${aid}`),
   parseAtt: (id, aid) => API.request('POST', `/documents/${id}/attachments/${aid}/parse`),
 
